@@ -19,6 +19,7 @@ export function ControlPanel({ studio }: { studio: any }) {
   const refModelRef = useRef<HTMLSelectElement>(null);
   const modeRef = useRef<HTMLSelectElement>(null);
   const refineRef = useRef<HTMLInputElement>(null);
+  const seedModeRef = useRef<HTMLSelectElement>(null);
 
   const handleGenerate = async () => {
     const prompt = promptRef.current?.value?.trim();
@@ -31,6 +32,7 @@ export function ControlPanel({ studio }: { studio: any }) {
       systemPrompt: sysRef.current?.value,
       mode: modeRef.current?.value || "auto",
       refine: refineRef.current?.checked || false,
+      seedMode: seedModeRef.current?.value || "soft",
     });
   };
 
@@ -289,6 +291,11 @@ export function ControlPanel({ studio }: { studio: any }) {
           <label className="flex items-center gap-1 select-none" style={{ color: "var(--text-dim)" }} title="Run a short LLM cleanup pass after the image-first render">
             <input type="checkbox" ref={refineRef} /> refine
           </label>
+          <select ref={seedModeRef} defaultValue="soft" className="flex-1" title="Agent mode: how strictly the reference underlay is kept">
+            <option value="soft">seed: soft</option>
+            <option value="locked">seed: locked</option>
+            <option value="off">seed: off</option>
+          </select>
         </div>
         <div className="flex gap-1">
           <button

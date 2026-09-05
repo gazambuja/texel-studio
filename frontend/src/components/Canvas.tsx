@@ -17,7 +17,7 @@ export function Canvas({ studio }: { studio: any }) {
   const [tilesetPreview, setTilesetPreview] = useState<{ name: string; files: string[] } | null>(null);
   const [canvasDisplaySize, setCanvasDisplaySize] = useState(512);
 
-  const { pixelData, spriteSize, currentPalette, selectedColorIdx, status } = studio;
+  const { pixelData, spriteSize, currentPalette, selectedColorIdx, status, seedPixels } = studio;
 
   // Resize canvas to fill available space
   useEffect(() => {
@@ -68,10 +68,20 @@ export function Canvas({ studio }: { studio: any }) {
         ctx.beginPath(); ctx.moveTo(0, i * scale + 0.5); ctx.lineTo(canvas.width, i * scale + 0.5); ctx.stroke();
       }
     }
+    // spec 0002 — mark cells the agent changed vs the reference underlay
+    if (seedPixels && seedPixels.length === pixelData.length) {
+      ctx.fillStyle = "rgba(120,200,255,0.22)";
+      for (let y = 0; y < pixelData.length; y++)
+        for (let x = 0; x < (pixelData[y]?.length || 0); x++) {
+          if ((seedPixels[y]?.[x] ?? -1) !== pixelData[y][x]) {
+            ctx.fillRect(x * scale, y * scale, scale, scale);
+          }
+        }
+    }
     prevPixelsRef.current = pixelData.map((row: number[]) => [...row]);
     prevSizeRef.current = spriteSize;
     prevPaletteRef.current = [...currentPalette.colors];
-  }, [pixelData, spriteSize, currentPalette, canvasDisplaySize]);
+  }, [pixelData, spriteSize, currentPalette, canvasDisplaySize, seedPixels]);
 
   // Diff-only pixel update
   const drawDiff = useCallback(() => {

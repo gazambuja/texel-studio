@@ -18,6 +18,7 @@ class SpriteGenerateParams(BaseModel):
     sprite_type: str = "block"
     system_prompt: Optional[str] = None
     reference_id: Optional[str] = None
+    seed_mode: str = "soft"       # spec 0002 — "soft" | "locked" | "off"
     # spec 0007 — completion score gate (headless: auto-continue on low score)
     score: bool = True
     score_threshold: Optional[int] = None
@@ -89,6 +90,7 @@ class SpriteGenerateHandler(JobHandler):
                     on_step=on_step,
                     existing_pixels=existing,
                     cancel_check=ctx.cancel_check,
+                    seed_mode=(params.seed_mode if rounds == 0 else "off"),
                     **({"max_steps": cfg.extra_steps} if rounds else {}),
                 )
 

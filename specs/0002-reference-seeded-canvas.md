@@ -1,7 +1,7 @@
 # Spec 0002 — Reference-Seeded Canvas
 
-- **Branch:** `spec/0002-reference-seeded-canvas` (from `spec/0001-image-first-pipeline`)
-- **Status:** Planned
+- **Branch:** `spec/0002-reference-seeded-canvas` (from `main`, after 0007)
+- **Status:** Implemented — merged to local `main`
 - **Depends on:** 0001 (`_render_core.quantize`, seed-aware agent prompt).
 - **North-star link:** The refinement agent stops guessing geometry; it edits a
   correct starting image.
@@ -64,23 +64,56 @@ suggestion.
 - New `GenerateRequest.seed_mode`; thread through `server.py` + `worker.py` +
   all agent-invoking job handlers.
 
-## 5. Tasks (outline)
+## 5. Tasks
 
-1. [ ] `Canvas` silhouette + lock enforcement + unit tests.
-2. [ ] Seed builder helper `jobs/_seed.py` (ref_id → grid + mask).
-3. [ ] `build_system_prompt(seeded=...)` variant.
-4. [ ] Thread `seed_mode` through API/worker/handlers.
-5. [ ] Diff tracking in `on_step` payloads.
-6. [ ] UI: `seed_mode` selector; underlay vs edits rendering.
-7. [ ] Verification (Section 6).
+1. [x] `agent.Canvas`: `silhouette` set + `locked` flag + `_put()` write choke
+   point (all 14 write sites routed through it) + `lock_hits`. Locked mode
+   blocks opaque↔transparent flips across the silhouette; recolour inside stays
+   free.
+2. [x] `jobs/_seed.py`: `build_seed(img, size, type, palette) -> (grid, mask)`
+   and `build_seed_from_b64(...)`, reusing `_render_core`.
+3. [x] `run_agent_stream` builds the seed when `is_new` + reference +
+   `seed_mode in {soft,locked}` + no existing pixels; seeded system-prompt
+   branch with soft/locked wording + "don't clear the canvas".
+4. [x] `seed_mode` threaded: `GenerateRequest` (default `"soft"`) →
+   `_run_agent_sse` → `run_agent_stream`; redis `{"type":"generate"}` payload →
+   `worker.handle_generate`; `SpriteGenerateParams` → `sprite.generate` handler
+   (round 0 only).
+5. [x] `canvas.seed_pixels` snapshot; `pixels` SSE events carry `seed_pixels`
+   when seeded.
+6. [x] UI: `seed: soft|locked|off` selector in `ControlPanel`; `useStudio`
+   tracks `seedPixels`; `Canvas.tsx` tints cells changed vs the underlay.
+   `static/` rebuilt.
+7. [x] Verification — Section 6.
+
+### Deviations / findings
+
+- Only the **explicit `mode: agent`** path is seeded. `mode: auto` + reference
+  goes through 0001's image-first pipeline (which already *is* a quantized
+  render), so it needs no seed.
+- **Observed:** in `soft` mode a weak model may still wipe the seed on its first
+  move (a `fill` with `-1`). The prompt now forbids this, but `soft` is by
+  definition permissive — `locked` is the guarantee, and the 0007 score gate
+  catches a bad result. Default stays `soft` per the spec.
+- `sprite_chat` (edits) is not seeded — it already has pixels.
 
 ## 6. Verification
 
-- Unit: locked mode blocks silhouette-breaking ops; soft mode allows them.
-- Manual: reference of a mushroom → seeded soft → agent spends its steps on
-  outline + eyes, not on blocking the cap shape. Locked mode: silhouette
-  pixel-identical to seed at finish.
-- Regression: `seed_mode: off` == pre-0002 output.
+- **Unit (`tests/test_seed.py`, 12 tests, 46 total green):**
+  - `build_seed` → transparent bg + mask == opaque cells for `icon`; full fill
+    for `block`; `build_seed_from_b64` round-trips.
+  - `Canvas` locked: blocks erasing a silhouette pixel, blocks extending the
+    silhouette, allows recolour inside; `fill_rect` on a locked canvas touches
+    only silhouette cells. Soft mode allows reshaping. Unlocked/no-silhouette
+    canvas is byte-for-byte unchanged behaviour.
+  - `run_agent_stream` (stubbed agent): `soft` seeds a non-blank canvas with a
+    silhouette + `seed_pixels`; `locked` sets the flag; `off` leaves it blank
+    with no silhouette.
+- **Live:** mushroom reference, `mode: agent`, `seed_mode: soft`, size 16 → the
+  first `pixels` SSE event has **84 non-blank pixels** (the underlay) and
+  carries `seed_pixels`. (Also surfaced the soft-wipe finding above.)
+- **Regression:** `seed_mode: off` → blank canvas, `silhouette is None` — the
+  pre-0002 code path.
 
 ## 7. Risks
 
@@ -91,7 +124,11 @@ suggestion.
 
 ## 8. Definition of done
 
-- [ ] Agent path starts from a reference-derived seed by default.
-- [ ] `locked` / `soft` / `off` all behave per spec, unit-tested.
-- [ ] UI exposes the mode and distinguishes underlay from agent edits.
-- [ ] Regression: `off` matches pre-0002.
+- [x] Agent path (`mode: agent`) starts from a reference-derived seed by default
+  (`seed_mode` defaults to `"soft"`).
+- [x] `locked` / `soft` / `off` behave per spec, unit-tested (`_put` choke point
+  + `tests/test_seed.py`).
+- [x] UI exposes `seed: soft|locked|off` and tints agent edits vs the underlay
+  (`Canvas.tsx` using `seed_pixels`).
+- [x] Regression: `off` == pre-0002 (blank canvas, no silhouette); 46 tests
+  green; existing Canvas behaviour unchanged when no silhouette is set.

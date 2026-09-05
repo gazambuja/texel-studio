@@ -76,6 +76,7 @@ def handle_generate(job: dict):
     reference_id = job.get("reference_id")
     is_continuation = job.get("is_continuation", False)
     existing_pixels = job.get("pixel_data")
+    seed_mode = job.get("seed_mode", "off")
 
     type_config = SPRITE_TYPES.get(sprite_type, SPRITE_TYPES["block"])
     ref_b64 = load_reference_b64(reference_id) if reference_id and not is_continuation else None
@@ -113,6 +114,7 @@ def handle_generate(job: dict):
             reference_b64=ref_b64,
             on_step=on_step,
             existing_pixels=existing_pixels,
+            seed_mode=seed_mode,
         )
 
         pixel_data = [row[:] for row in canvas.pixels]

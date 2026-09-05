@@ -94,17 +94,40 @@ def _get_posthog_callback(distinct_id: str | None = None, trace_id: str | None =
 # ── Canvas State ──
 
 class Canvas:
-    def __init__(self, size: int, palette: list[str], pixels: list[list[int]] | None = None):
+    def __init__(self, size: int, palette: list[str], pixels: list[list[int]] | None = None,
+                 silhouette: set | None = None, locked: bool = False):
         self.size = size
         self.palette = palette
         self.pixels = pixels if pixels else [[-1] * size for _ in range(size)]
+        # spec 0002 — reference-seeded canvas.
+        # `silhouette` is the set of (x, y) that were opaque in the seed. When
+        # `locked`, drawing may not flip a pixel across that boundary
+        # (opaque<->transparent); colors inside the silhouette stay editable.
+        self.silhouette = silhouette
+        self.locked = locked
+        self.lock_hits = 0
+        self.seed_pixels: list[list[int]] | None = None
+
+    def _put(self, x: int, y: int, color: int) -> bool:
+        """Single write choke point. Returns True if the pixel was written."""
+        if not (0 <= x < self.size and 0 <= y < self.size):
+            return False
+        if self.locked and self.silhouette is not None:
+            inside = (x, y) in self.silhouette
+            becomes_transparent = color == -1
+            if (inside and becomes_transparent) or (not inside and not becomes_transparent):
+                self.lock_hits += 1
+                return False
+        self.pixels[y][x] = color
+        return True
 
     def set_pixel(self, x: int, y: int, color: int) -> str:
         if not (0 <= x < self.size and 0 <= y < self.size):
             return f"Error: ({x},{y}) out of bounds (0-{self.size-1})"
         if color < -1 or color >= len(self.palette):
             return f"Error: color index {color} invalid (use -1 to {len(self.palette)-1})"
-        self.pixels[y][x] = color
+        if not self._put(x, y, color):
+            return f"Skipped ({x},{y}): locked silhouette pixel"
         return f"Set ({x},{y}) to {color}"
 
     def get_pixel(self, x: int, y: int) -> int:
@@ -118,8 +141,8 @@ class Canvas:
         count = 0
         for y in range(max(0, y1), min(self.size, y2 + 1)):
             for x in range(max(0, x1), min(self.size, x2 + 1)):
-                self.pixels[y][x] = color
-                count += 1
+                if self._put(x, y, color):
+                    count += 1
         return f"Filled rect ({x1},{y1})-({x2},{y2}) with {color}, {count} pixels"
 
     def draw_line(self, x1: int, y1: int, x2: int, y2: int, color: int) -> str:
@@ -132,8 +155,7 @@ class Canvas:
         count = 0
         cx, cy = x1, y1
         while True:
-            if 0 <= cx < self.size and 0 <= cy < self.size:
-                self.pixels[cy][cx] = color
+            if self._put(cx, cy, color):
                 count += 1
             if cx == x2 and cy == y2:
                 break
@@ -151,8 +173,7 @@ class Canvas:
             return f"Error: color index {color} invalid"
         count = 0
         for x in range(max(0, x_start), min(self.size, x_end + 1)):
-            if 0 <= y < self.size:
-                self.pixels[y][x] = color
+            if self._put(x, y, color):
                 count += 1
         return f"Filled row y={y}, {count} pixels"
 
@@ -161,8 +182,7 @@ class Canvas:
             return f"Error: color index {color} invalid"
         count = 0
         for y in range(max(0, y_start), min(self.size, y_end + 1)):
-            if 0 <= x < self.size:
-                self.pixels[y][x] = color
+            if self._put(x, y, color):
                 count += 1
         return f"Filled column x={x}, {count} pixels"
 
@@ -183,8 +203,8 @@ class Canvas:
                 lx = dx * cos_a + dy * sin_a
                 ly = -dx * sin_a + dy * cos_a
                 if abs(lx) <= hw and abs(ly) <= hh:
-                    self.pixels[py][px] = color
-                    count += 1
+                    if self._put(px, py, color):
+                        count += 1
         return count
 
     def to_image(self) -> Image.Image:
@@ -257,15 +277,9 @@ class Canvas:
                 dx, dy = x - cx, y - cy
                 dist_sq = dx * dx + dy * dy
                 r_sq = radius * radius
-                if fill:
-                    if dist_sq <= r_sq:
-                        self.pixels[y][x] = color
-                        count += 1
-                else:
-                    # Outline only — within 1px of the edge
-                    if abs(dist_sq - r_sq) <= radius * 2:
-                        self.pixels[y][x] = color
-                        count += 1
+                hit = dist_sq <= r_sq if fill else abs(dist_sq - r_sq) <= radius * 2
+                if hit and self._put(x, y, color):
+                    count += 1
         return count
 
     def draw_ellipse(self, cx: int, cy: int, rx: int, ry: int, color: int, fill: bool = True) -> int:
@@ -274,14 +288,9 @@ class Canvas:
             for x in range(max(0, cx - rx), min(self.size, cx + rx + 1)):
                 dx, dy = (x - cx) / max(rx, 1), (y - cy) / max(ry, 1)
                 dist = dx * dx + dy * dy
-                if fill:
-                    if dist <= 1.0:
-                        self.pixels[y][x] = color
-                        count += 1
-                else:
-                    if abs(dist - 1.0) <= 0.3:
-                        self.pixels[y][x] = color
-                        count += 1
+                hit = dist <= 1.0 if fill else abs(dist - 1.0) <= 0.3
+                if hit and self._put(x, y, color):
+                    count += 1
         return count
 
     def draw_triangle(self, x1: int, y1: int, x2: int, y2: int, x3: int, y3: int, color: int, fill: bool = True) -> int:
@@ -301,8 +310,7 @@ class Canvas:
                 d3 = sign(x, y, x3, y3, x1, y1)
                 has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
                 has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
-                if not (has_neg and has_pos):
-                    self.pixels[y][x] = color
+                if not (has_neg and has_pos) and self._put(x, y, color):
                     count += 1
         return count
 
@@ -326,8 +334,8 @@ class Canvas:
             for x in range(max(0, x1), min(self.size, x2 + 1)):
                 n = self._hash_noise(int(x * scale), int(y * scale), seed)
                 idx = int(n * n_colors) % n_colors
-                self.pixels[y][x] = colors[idx]
-                count += 1
+                if self._put(x, y, colors[idx]):
+                    count += 1
         return count
 
     def fill_voronoi(self, x1: int, y1: int, x2: int, y2: int,
@@ -353,8 +361,8 @@ class Canvas:
                     if d < best_dist:
                         best_dist = d
                         best_color = pc
-                self.pixels[y][x] = best_color
-                count += 1
+                if self._put(x, y, best_color):
+                    count += 1
         return count
 
     def fill_noise_circle(self, cx: int, cy: int, radius: int,
@@ -368,8 +376,8 @@ class Canvas:
             for x in range(max(0, cx - radius), min(self.size, cx + radius + 1)):
                 if (x - cx) ** 2 + (y - cy) ** 2 <= radius ** 2:
                     n = self._hash_noise(x, y, seed)
-                    self.pixels[y][x] = colors[int(n * n_colors) % n_colors]
-                    count += 1
+                    if self._put(x, y, colors[int(n * n_colors) % n_colors]):
+                        count += 1
         return count
 
     def to_image_b64(self, scale: int = 512) -> str:
@@ -738,6 +746,7 @@ def run_agent_stream(
     max_steps: int = 80,
     existing_pixels: list[list[int]] | None = None,
     cancel_check: Any = None,
+    seed_mode: str = "off",
 ):
     """
     Run the agent or continue an existing session.
@@ -750,12 +759,29 @@ def run_agent_stream(
     job has been canceled. The stream loop checks it after every step and exits
     cleanly (drains remaining chunks to avoid GeneratorExit in callbacks).
     """
+    is_new = not thread_exists(gen_id)
+    thread_id = _thread_id_for(gen_id)
+
+    # spec 0002 — reference-seeded canvas. On a fresh generation with a reference
+    # and seed_mode on, start from a quantized underlay of the reference instead
+    # of a blank canvas. `locked` freezes the silhouette (opaque<->transparent).
+    silhouette = None
+    locked = seed_mode == "locked"
+    if is_new and seed_mode in ("soft", "locked") and reference_b64 and not _has_content(existing_pixels):
+        try:
+            from jobs._seed import build_seed_from_b64
+            existing_pixels, silhouette = build_seed_from_b64(
+                reference_b64, size, sprite_type, palette
+            )
+        except Exception:
+            silhouette, locked = None, False
+
     # Build the canvas from the caller-provided pixel state. Canvas pixel state
     # lives outside the LangGraph thread (it's owned by the job system, not
     # the conversation). LangGraph just owns the message history.
-    canvas = Canvas(size, palette, existing_pixels)
-    is_new = not thread_exists(gen_id)
-    thread_id = _thread_id_for(gen_id)
+    canvas = Canvas(size, palette, existing_pixels, silhouette=silhouette, locked=locked)
+    # Snapshot of the underlay so progress consumers can highlight agent edits.
+    canvas.seed_pixels = [row[:] for row in canvas.pixels] if silhouette is not None else None
 
     vision = _is_vision_model(model_name)
     full_toolset = vision  # small local models get the simplified toolset
@@ -771,12 +797,22 @@ def run_agent_stream(
     if is_new:
         sys_prompt = build_system_prompt(message, palette, size, style_prompt, reference_b64 is not None, sprite_type, model_name)
         if seeded:
+            lock_note = (
+                "\nThe silhouette is LOCKED: drawing that would add or remove the "
+                "subject's outline is ignored — you can only change colors and "
+                "detail inside the existing shape."
+                if locked else
+                "\nThe underlay is a suggestion — you may reshape it where the "
+                "reference clearly disagrees."
+            )
             sys_prompt += f"""
 
 IMPORTANT — THE CANVAS IS NOT BLANK.
 It already contains a faithful first-pass conversion of the reference. Your job
-is to REFINE it, not rebuild it. Call view_canvas first to see the current
-state, then make only the changes the request asks for.
+is to REFINE it, not rebuild it: fix edges, fix wrong colors, add readable
+detail, then finish. Call view_canvas first.
+Do NOT clear the canvas or fill large areas with -1 to "start over" — work from
+what is already there.{lock_note}
 
 CURRENT CANVAS STATE:
 {canvas.to_grid_string()}"""
