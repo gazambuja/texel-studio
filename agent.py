@@ -421,6 +421,71 @@ def _preview_image_block(canvas, reference_img) -> dict | None:
         return None
 
 
+def _image_block_from(img, target_px: int = 320) -> dict | None:
+    import base64 as _b64
+    import io as _io
+    try:
+        w = img.width or 1
+        scale = max(1, round(target_px / w))
+        big = img.convert("RGBA").resize((w * scale, (img.height or 1) * scale), Image.NEAREST)
+        buf = _io.BytesIO()
+        big.save(buf, format="PNG")
+        return {"type": "image_url",
+                "image_url": {"url": "data:image/png;base64," + _b64.b64encode(buf.getvalue()).decode()}}
+    except Exception:
+        return None
+
+
+# ── spec 0004 — persistent reference context ──
+
+REANCHOR_EVERY = int(os.getenv("REANCHOR_EVERY", "8"))
+MAX_IMAGE_PARTS = int(os.getenv("MAX_IMAGE_PARTS", "3"))
+
+
+def _msg_has_image(msg) -> bool:
+    c = getattr(msg, "content", None)
+    return isinstance(c, list) and any(
+        isinstance(p, dict) and p.get("type") == "image_url" for p in c
+    )
+
+
+def _strip_images(msg):
+    kept = [p for p in msg.content
+            if not (isinstance(p, dict) and p.get("type") == "image_url")]
+    kept.append({"type": "text", "text": "[preview image removed to save context]"})
+    try:
+        return msg.model_copy(update={"content": kept})
+    except Exception:
+        return msg
+
+
+def _make_context_hook(subject: str):
+    """create_react_agent pre_model_hook (spec 0004): every model call,
+    (1) show the LLM at most MAX_IMAGE_PARTS newest images (older ones -> text
+        stub), never touching the first message; and
+    (2) every REANCHOR_EVERY model calls, if no image was shown in the last two
+        messages, append an ephemeral text reminder of the target subject.
+    Uses `llm_input_messages` so the persisted thread keeps full history."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    def hook(state):
+        msgs = list(state["messages"])
+        img_idx = [i for i, m in enumerate(msgs) if i != 0 and _msg_has_image(m)]
+        stale = set(img_idx[:-MAX_IMAGE_PARTS]) if len(img_idx) > MAX_IMAGE_PARTS else set()
+        out = [_strip_images(m) if i in stale else m for i, m in enumerate(msgs)]
+
+        ai_n = sum(1 for m in msgs if isinstance(m, AIMessage))
+        recent_img = any(_msg_has_image(m) for m in msgs[-2:])
+        if subject and ai_n and ai_n % REANCHOR_EVERY == 0 and not recent_img:
+            out = out + [HumanMessage(content=(
+                f"Reminder — the target is: {subject[:200]}. If you have not "
+                "compared your work to the reference recently, call view_reference()."
+            ))]
+        return {"llm_input_messages": out}
+
+    return hook
+
+
 def make_tools(canvas: Canvas, vision: bool = True, full_toolset: bool = True,
                reference_img=None, tool_images: bool = True):
     """Create agent tools.
@@ -498,6 +563,23 @@ def make_tools(canvas: Canvas, vision: bool = True, full_toolset: bool = True,
         return text
 
     @tool
+    def view_reference():
+        """Look at the reference image again, side by side with your current sprite.
+        Use this whenever you are unsure your sprite still matches the target."""
+        if reference_img is None:
+            return "No reference image for this sprite — the target is described in the instructions."
+        if not (vision and tool_images):
+            return "Reference not viewable in this mode; it is described in the instructions."
+        blocks = [{"type": "text", "text": "Left: the REFERENCE (your target). Right: your CURRENT sprite."}]
+        rb = _image_block_from(reference_img)
+        cb = _preview_image_block(canvas, None)
+        if rb:
+            blocks.append(rb)
+        if cb:
+            blocks.append(cb)
+        return blocks if len(blocks) > 1 else "Reference unavailable."
+
+    @tool
     def get_pixel(x: int, y: int) -> str:
         """Get the palette index at position (x, y)."""
         v = canvas.get_pixel(x, y)
@@ -515,12 +597,14 @@ def make_tools(canvas: Canvas, vision: bool = True, full_toolset: bool = True,
         count = canvas.fill_noise(x1, y1, x2, y2, colors, seed, scale)
         return f"Noise-filled rect ({x1},{y1})-({x2},{y2}) with {len(colors)} colors, {count}px"
 
-    # Core tools — always included (8 tools)
+    # Core tools — always included
     core = [
         draw_pixel, draw_pixels, fill_rect, fill_row, fill_column, draw_line,
         draw_circle, noise_fill_rect,
         view_canvas, get_pixel, finish,
     ]
+    if reference_img is not None:
+        core.append(view_reference)
 
     if not full_toolset:
         return core
@@ -815,7 +899,12 @@ def run_agent_stream(
                        reference_img=reference_img, tool_images=tool_images)
     llm = _get_llm(model_name)
     checkpointer = get_checkpointer()
-    agent = create_react_agent(llm, tools, checkpointer=checkpointer)
+    # spec 0004 — keep the target in view (periodic re-anchor) and cap how many
+    # preview images the LLM carries at once.
+    agent = create_react_agent(
+        llm, tools, checkpointer=checkpointer,
+        pre_model_hook=_make_context_hook(message),
+    )
 
     # A fresh thread that was handed a pre-filled canvas (e.g. the image-first
     # pipeline's refine pass) is editing, not creating from scratch.
@@ -861,7 +950,11 @@ CURRENT CANVAS STATE:
 USER REQUEST: {message}
 
 Use the canvas tools to make the requested changes. Call finish when done."""
-        input_message = HumanMessage(content=follow_up)
+        parts: list = [{"type": "text", "text": follow_up}]
+        if reference_b64:  # spec 0004 — continuations get the reference too
+            parts.append({"type": "image_url",
+                          "image_url": {"url": f"data:image/png;base64,{reference_b64}"}})
+        input_message = HumanMessage(content=parts)
 
     config = {"configurable": {"thread_id": thread_id}}
 

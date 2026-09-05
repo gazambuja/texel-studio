@@ -573,7 +573,7 @@ def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = Fal
     sprite_type = gen["sprite_type"] or "block"
     type_config = SPRITE_TYPES.get(sprite_type, SPRITE_TYPES["block"])
     system_prompt = gen["system_prompt"] or DEFAULT_SYSTEM_PROMPT
-    ref_b64 = load_reference_b64(gen["reference_id"]) if not is_continuation else None
+    ref_b64 = load_reference_b64(gen["reference_id"])  # spec 0004 — continuations too
 
     if not is_continuation:
         db.execute("INSERT INTO generation_logs (generation_id, step, message) VALUES (?, ?, ?)",
@@ -1308,6 +1308,7 @@ async def chat_with_agent(data: ChatRequest):
             "sprite_type": gen["sprite_type"] or "block",
             "system_prompt": gen["system_prompt"],
             "pixel_data": pixel_data,
+            "reference_id": gen["reference_id"],
             "is_continuation": True,
         }))
         return StreamingResponse(
