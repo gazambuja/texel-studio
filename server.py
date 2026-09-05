@@ -548,7 +548,8 @@ def _wait_for_result(sub):
 
 def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = False,
                    colors: list[str] | None = None, score_cfg=None, max_steps: int | None = None,
-                   seed_mode: str = "off", workflow: str = "freeform"):
+                   seed_mode: str = "off", workflow: str = "freeform",
+                   temperature: float | None = None, seed: int | None = None):
     """Shared SSE generator for initial generation and chat continuation.
 
     `score_cfg` (a scoring.ScoreConfig) enables the completion score gate: when
@@ -640,6 +641,8 @@ def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = Fal
                     on_step=on_step,
                     existing_pixels=current_pixels,
                     seed_mode=seed_mode,
+                    temperature=temperature,
+                    seed=seed,
                 )
                 if max_steps is not None:
                     agent_kwargs["max_steps"] = max_steps
@@ -916,6 +919,9 @@ class GenerateRequest(BaseModel):
     seed_mode: str = "soft"       # "soft" | "locked" | "off"
     # spec 0005 — silhouette-first phased workflow (agent path)
     workflow: Optional[str] = None   # "phased" | "freeform" ; default: phased iff reference
+    # spec 0006 — deterministic drawing config
+    temperature: Optional[float] = None   # overrides the 0.2 default / per-phase temps
+    seed: Optional[int] = None            # overrides the gen-id-derived seed
     # spec 0007 — completion score gate
     score: bool = True            # score the finished sprite against the prompt
     score_threshold: Optional[int] = None
@@ -1221,6 +1227,8 @@ async def start_generation(data: GenerateRequest):
                 "is_continuation": False,
                 "seed_mode": data.seed_mode,
                 "workflow": (data.workflow or ("phased" if data.reference_id else "freeform")),
+                "temperature": data.temperature,
+                "seed": data.seed,
             }))
         return StreamingResponse(
             _sse_from_pubsub(sub),
@@ -1237,7 +1245,7 @@ async def start_generation(data: GenerateRequest):
         workflow = data.workflow or ("phased" if data.reference_id else "freeform")
         generator = _run_agent_sse(gen_id, data.prompt, colors=data.colors,
                                    score_cfg=score_cfg, seed_mode=data.seed_mode,
-                                   workflow=workflow)
+                                   workflow=workflow, temperature=data.temperature, seed=data.seed)
     return StreamingResponse(
         generator,
         media_type="text/event-stream",

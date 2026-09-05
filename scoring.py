@@ -121,7 +121,11 @@ def assess(
             "image_url": {"url": f"data:image/png;base64,{reference_b64}"},
         })
 
-    llm = _get_llm(model_name, temperature=temperature).with_structured_output(AssessmentScore)
+    from agent import SamplingConfig, _seed_from
+    llm = _get_llm(
+        model_name,
+        SamplingConfig(temperature=temperature, seed=_seed_from(f"score:{goal}")),
+    ).with_structured_output(AssessmentScore)
     result = llm.invoke([SystemMessage(content=_SYS), HumanMessage(content=parts)])
     if isinstance(result, dict):
         result = AssessmentScore(**result)

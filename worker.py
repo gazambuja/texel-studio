@@ -78,6 +78,8 @@ def handle_generate(job: dict):
     existing_pixels = job.get("pixel_data")
     seed_mode = job.get("seed_mode", "off")
     workflow = job.get("workflow", "freeform")
+    temperature = job.get("temperature")
+    seed = job.get("seed")
 
     type_config = SPRITE_TYPES.get(sprite_type, SPRITE_TYPES["block"])
     ref_b64 = load_reference_b64(reference_id) if reference_id else None  # spec 0004 — continuations too
@@ -122,6 +124,8 @@ def handle_generate(job: dict):
             on_step=on_step,
             existing_pixels=existing_pixels,
             seed_mode=seed_mode,
+            temperature=temperature,
+            seed=seed,
         )
 
         pixel_data = [row[:] for row in canvas.pixels]
