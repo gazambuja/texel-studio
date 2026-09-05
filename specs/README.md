@@ -40,20 +40,23 @@ Rules:
 
 ## Branch strategy
 
-Specs advance in a chain — each branches from the previous spec's branch so
-later work builds on earlier work without waiting for `main` merges.
+One spec at a time. Each spec is implemented on its own branch cut from **local
+`main`**, verified, then merged (`--no-ff`) into local `main` before the next
+spec starts. Local `main` is never pushed — `origin` is upstream
+(`EYamanS/texel-studio`), `fork` is the contributor's copy.
 
-| Spec | Branch | Branches from | Theme |
-|------|--------|---------------|-------|
-| — | `spec/sdd-scaffold` | `feature/extract-reference-palette` | These docs |
-| 0001 | `spec/0001-image-first-pipeline` | `spec/sdd-scaffold` | Image model + quantize is the primary path |
-| 0002 | `spec/0002-reference-seeded-canvas` | `spec/0001-...` | Agent starts from the quantized reference, not blank |
-| 0003 | `spec/0003-visual-preview-overhaul` | `spec/0002-...` | Give the agent a preview it can actually read |
-| 0004 | `spec/0004-persistent-reference-context` | `spec/0003-...` | Keep the reference in front of the agent |
-| 0005 | `spec/0005-silhouette-first-workflow` | `spec/0004-...` | Structured phases: silhouette → fill → detail |
-| 0006 | `spec/0006-deterministic-drawing-config` | `spec/0005-...` | Sampling/temperature tuned per phase |
+| Spec | Branch | Cut from | Theme |
+|------|--------|----------|-------|
+| 0001 | `spec/0001-image-first-pipeline` | `main` | Image model + quantize is the primary path |
+| 0002 | `spec/0002-reference-seeded-canvas` | `main` (after 0001) | Agent starts from the quantized reference, not blank |
+| 0003 | `spec/0003-visual-preview-overhaul` | `main` (after 0002) | Give the agent a preview it can actually read |
+| 0004 | `spec/0004-persistent-reference-context` | `main` (after 0003) | Keep the reference in front of the agent |
+| 0005 | `spec/0005-silhouette-first-workflow` | `main` (after 0004) | Structured phases: silhouette → fill → detail |
+| 0006 | `spec/0006-deterministic-drawing-config` | `main` (after 0005) | Sampling/temperature tuned per phase |
 
-When a spec lands on `main`, rebase the downstream chain.
+Because each spec lands on `main` before the next is cut, later specs
+automatically build on earlier work — no chain rebasing needed. The
+"Depends on" lines in each spec still document the logical ordering.
 
 ## Execution order
 
