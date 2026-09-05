@@ -399,8 +399,63 @@ def _is_vision_model(model_name: str) -> bool:
     return True
 
 
-def make_tools(canvas: Canvas, vision: bool = True, full_toolset: bool = True):
-    """Create agent tools. vision=False omits base64 previews. full_toolset=False drops advanced shape/noise tools."""
+_PREVIEW_MARKER = "​canvas-preview"  # zero-width sentinel to find our own injected messages
+
+
+def _make_preview_hook(canvas, reference_img):
+    """create_react_agent pre_model_hook: after a view_canvas tool result, inject
+    the triptych preview as a real image HumanMessage and drop the previous one
+    (so at most one preview image sits in context — token guardrail)."""
+    import base64 as _b64
+    import io as _io
+
+    from langchain_core.messages import HumanMessage, RemoveMessage, ToolMessage
+
+    def hook(state):
+        messages = state["messages"]
+        last = messages[-1] if messages else None
+        is_view = isinstance(last, ToolMessage) and getattr(last, "name", "") == "view_canvas"
+        if not is_view:
+            return {"llm_input_messages": messages}
+
+        try:
+            from preview import build_preview_image
+            img = build_preview_image(canvas, reference_img)
+            buf = _io.BytesIO()
+            img.save(buf, format="PNG")
+            data_url = "data:image/png;base64," + _b64.b64encode(buf.getvalue()).decode()
+        except Exception:
+            return {"llm_input_messages": messages}
+
+        updates: list = []
+        for m in messages:
+            if getattr(m, "id", None) and isinstance(getattr(m, "content", None), list):
+                if any(isinstance(p, dict) and p.get("text", "").startswith(_PREVIEW_MARKER)
+                       for p in m.content):
+                    updates.append(RemoveMessage(id=m.id))
+        updates.append(HumanMessage(content=[
+            {"type": "text", "text": _PREVIEW_MARKER + "\nCanvas preview — left to right: "
+             + ("reference, " if reference_img is not None else "")
+             + "current sprite, current sprite with a coordinate grid (x increases →, y increases ↓). "
+             "Blue-tinted cells are pixels you have changed from the starting underlay."},
+            {"type": "image_url", "image_url": {"url": data_url}},
+        ]))
+        return {"messages": updates}
+
+    return hook
+
+
+def make_tools(canvas: Canvas, vision: bool = True, full_toolset: bool = True,
+               reference_img=None):
+    """Create agent tools.
+
+    vision=False -> ASCII-only view_canvas.
+    vision=True  -> view_canvas returns a compact text summary; the triptych
+                    preview image is injected as a real image message by
+                    run_agent_stream's pre_model_hook (spec 0003).
+    full_toolset=False drops advanced shape/noise tools.
+    `reference_img` is only used by that hook, kept here for signature symmetry.
+    """
 
     @tool
     def draw_pixel(x: int, y: int, color: int) -> str:
@@ -454,37 +509,11 @@ def make_tools(canvas: Canvas, vision: bool = True, full_toolset: bool = True):
 
     @tool
     def view_canvas() -> str:
-        """View the current canvas. Returns a visual grid where each character is a palette index (0-9, A-Z) and '.' is transparent. Use this to check your work."""
-        grid = canvas.to_visual_grid()
-
-        # Color usage summary
-        color_counts: dict[int, int] = {}
-        for row in canvas.pixels:
-            for v in row:
-                color_counts[v] = color_counts.get(v, 0) + 1
-
-        summary = []
-        for idx, count in sorted(color_counts.items(), key=lambda x: -x[1]):
-            if idx == -1:
-                summary.append(f". = transparent: {count}px")
-            elif 0 <= idx < len(canvas.palette):
-                char = str(idx) if idx < 10 else chr(ord("A") + idx - 10)
-                summary.append(f"{char} = {idx}({canvas.palette[idx]}): {count}px")
-
-        total = sum(c for i, c in color_counts.items() if i >= 0)
-
-        # Spatial summary: describe each quadrant
-        half = canvas.size // 2
-        spatial = f"TOP-LEFT: {canvas.region_summary(0, 0, half-1, half-1)} | TOP-RIGHT: {canvas.region_summary(0, half, half-1, canvas.size-1)} | BOTTOM-LEFT: {canvas.region_summary(half, 0, canvas.size-1, half-1)} | BOTTOM-RIGHT: {canvas.region_summary(half, half, canvas.size-1, canvas.size-1)}"
-
-        result = f"{grid}\n\nLEGEND: {', '.join(summary[:12])}\nFilled: {total}/{canvas.size*canvas.size}px\nLAYOUT: {spatial}"
-
-        # Only include base64 preview for vision-capable models
-        if vision:
-            img_b64 = canvas.to_image_b64(64)
-            result += f"\n\n[PREVIEW base64 PNG 64x64]\n{img_b64}"
-
-        return result
+        """View the current canvas: color legend, fill counts and a spatial layout
+        summary (plus an ASCII grid for small canvases). Vision models also get an
+        upscaled, coordinate-labelled preview image. Call this often to check your work."""
+        from preview import build_preview_text
+        return build_preview_text(canvas)
 
     @tool
     def get_pixel(x: int, y: int) -> str:
@@ -785,10 +814,25 @@ def run_agent_stream(
 
     vision = _is_vision_model(model_name)
     full_toolset = vision  # small local models get the simplified toolset
-    tools = make_tools(canvas, vision=vision, full_toolset=full_toolset)
+
+    # Decode the reference once for the preview triptych (spec 0003).
+    reference_img = None
+    if vision and reference_b64:
+        try:
+            import base64 as _b64, io as _io
+            reference_img = Image.open(_io.BytesIO(_b64.b64decode(reference_b64))).convert("RGBA")
+        except Exception:
+            reference_img = None
+
+    tools = make_tools(canvas, vision=vision, full_toolset=full_toolset, reference_img=reference_img)
     llm = _get_llm(model_name)
     checkpointer = get_checkpointer()
-    agent = create_react_agent(llm, tools, checkpointer=checkpointer)
+
+    # spec 0003 — after every view_canvas tool result, hand the model a real
+    # upscaled, coordinate-labelled preview image (works across providers because
+    # it goes in as a HumanMessage, not a tool-role image).
+    pre_hook = _make_preview_hook(canvas, reference_img) if vision else None
+    agent = create_react_agent(llm, tools, checkpointer=checkpointer, pre_model_hook=pre_hook)
 
     # A fresh thread that was handed a pre-filled canvas (e.g. the image-first
     # pipeline's refine pass) is editing, not creating from scratch.
