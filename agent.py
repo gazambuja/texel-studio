@@ -399,8 +399,39 @@ def _is_vision_model(model_name: str) -> bool:
     return True
 
 
-def make_tools(canvas: Canvas, vision: bool = True, full_toolset: bool = True):
-    """Create agent tools. vision=False omits base64 previews. full_toolset=False drops advanced shape/noise tools."""
+def _supports_tool_images(model_name: str) -> bool:
+    """True if the provider accepts image content inside a tool result message.
+
+    Gemini (direct + Vertex) and most local vision models do; OpenAI's function
+    role is text-only, so those fall back to the text-only preview.
+    """
+    return not model_name.startswith(OPENAI_MODEL_PREFIXES) and model_name not in OPENAI_MODELS_ENV
+
+
+def _preview_image_block(canvas, reference_img) -> dict | None:
+    import base64 as _b64
+    import io as _io
+    try:
+        from preview import build_preview_image
+        buf = _io.BytesIO()
+        build_preview_image(canvas, reference_img).save(buf, format="PNG")
+        url = "data:image/png;base64," + _b64.b64encode(buf.getvalue()).decode()
+        return {"type": "image_url", "image_url": {"url": url}}
+    except Exception:
+        return None
+
+
+def make_tools(canvas: Canvas, vision: bool = True, full_toolset: bool = True,
+               reference_img=None, tool_images: bool = True):
+    """Create agent tools.
+
+    vision=False -> ASCII-only view_canvas.
+    vision=True  -> view_canvas returns a compact text summary; the triptych
+                    preview image is injected as a real image message by
+                    run_agent_stream's pre_model_hook (spec 0003).
+    full_toolset=False drops advanced shape/noise tools.
+    `reference_img` is only used by that hook, kept here for signature symmetry.
+    """
 
     @tool
     def draw_pixel(x: int, y: int, color: int) -> str:
@@ -453,38 +484,18 @@ def make_tools(canvas: Canvas, vision: bool = True, full_toolset: bool = True):
         return f"Drew {'filled' if fill else 'outline'} circle at ({cx},{cy}) r={radius}, {count}px"
 
     @tool
-    def view_canvas() -> str:
-        """View the current canvas. Returns a visual grid where each character is a palette index (0-9, A-Z) and '.' is transparent. Use this to check your work."""
-        grid = canvas.to_visual_grid()
-
-        # Color usage summary
-        color_counts: dict[int, int] = {}
-        for row in canvas.pixels:
-            for v in row:
-                color_counts[v] = color_counts.get(v, 0) + 1
-
-        summary = []
-        for idx, count in sorted(color_counts.items(), key=lambda x: -x[1]):
-            if idx == -1:
-                summary.append(f". = transparent: {count}px")
-            elif 0 <= idx < len(canvas.palette):
-                char = str(idx) if idx < 10 else chr(ord("A") + idx - 10)
-                summary.append(f"{char} = {idx}({canvas.palette[idx]}): {count}px")
-
-        total = sum(c for i, c in color_counts.items() if i >= 0)
-
-        # Spatial summary: describe each quadrant
-        half = canvas.size // 2
-        spatial = f"TOP-LEFT: {canvas.region_summary(0, 0, half-1, half-1)} | TOP-RIGHT: {canvas.region_summary(0, half, half-1, canvas.size-1)} | BOTTOM-LEFT: {canvas.region_summary(half, 0, canvas.size-1, half-1)} | BOTTOM-RIGHT: {canvas.region_summary(half, half, canvas.size-1, canvas.size-1)}"
-
-        result = f"{grid}\n\nLEGEND: {', '.join(summary[:12])}\nFilled: {total}/{canvas.size*canvas.size}px\nLAYOUT: {spatial}"
-
-        # Only include base64 preview for vision-capable models
-        if vision:
-            img_b64 = canvas.to_image_b64(64)
-            result += f"\n\n[PREVIEW base64 PNG 64x64]\n{img_b64}"
-
-        return result
+    def view_canvas():
+        """View the current canvas: color legend, fill counts and a spatial layout
+        summary (plus an ASCII grid for small canvases). Vision models also get an
+        upscaled, coordinate-labelled preview image (reference | current | current
+        with a coordinate grid; blue tint = pixels you changed). Call this often."""
+        from preview import build_preview_text
+        text = build_preview_text(canvas)
+        if vision and tool_images:
+            block = _preview_image_block(canvas, reference_img)
+            if block is not None:
+                return [{"type": "text", "text": text}, block]
+        return text
 
     @tool
     def get_pixel(x: int, y: int) -> str:
@@ -785,7 +796,23 @@ def run_agent_stream(
 
     vision = _is_vision_model(model_name)
     full_toolset = vision  # small local models get the simplified toolset
-    tools = make_tools(canvas, vision=vision, full_toolset=full_toolset)
+
+    # Decode the reference once for the preview triptych (spec 0003).
+    reference_img = None
+    if vision and reference_b64:
+        try:
+            import base64 as _b64, io as _io
+            reference_img = Image.open(_io.BytesIO(_b64.b64decode(reference_b64))).convert("RGBA")
+        except Exception:
+            reference_img = None
+
+    # spec 0003 — view_canvas returns an upscaled, coordinate-labelled triptych
+    # image directly in its tool result (Gemini / Vertex / local vision models
+    # accept image content in tool messages). OpenAI's function role is text-only,
+    # so those get the improved text summary.
+    tool_images = vision and _supports_tool_images(model_name)
+    tools = make_tools(canvas, vision=vision, full_toolset=full_toolset,
+                       reference_img=reference_img, tool_images=tool_images)
     llm = _get_llm(model_name)
     checkpointer = get_checkpointer()
     agent = create_react_agent(llm, tools, checkpointer=checkpointer)
