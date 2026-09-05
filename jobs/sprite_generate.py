@@ -20,6 +20,8 @@ class SpriteGenerateParams(BaseModel):
     reference_id: Optional[str] = None
     seed_mode: str = "soft"       # spec 0002 — "soft" | "locked" | "off"
     workflow: Optional[str] = None   # spec 0005 — "phased" | "freeform"
+    temperature: Optional[float] = None   # spec 0006
+    seed: Optional[int] = None
     # spec 0007 — completion score gate (headless: auto-continue on low score)
     score: bool = True
     score_threshold: Optional[int] = None
@@ -98,6 +100,8 @@ class SpriteGenerateHandler(JobHandler):
                     existing_pixels=existing,
                     cancel_check=ctx.cancel_check,
                     seed_mode=(params.seed_mode if rounds == 0 else "off"),
+                    temperature=params.temperature,
+                    seed=params.seed,
                     **({"max_steps": cfg.extra_steps} if rounds else {}),
                 )
 

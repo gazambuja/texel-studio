@@ -683,6 +683,54 @@ def make_tools(canvas: Canvas, vision: bool = True, full_toolset: bool = True,
 
 OPENAI_MODEL_PREFIXES = ("gpt-", "o1-", "o3-")
 
+# ── spec 0006 — deterministic drawing config ──
+
+AGENT_TEMPERATURE = float(os.getenv("AGENT_TEMPERATURE", "0.2"))
+
+# Per-phase temperature (0005). Precision phases run colder; detail breathes.
+PHASE_TEMPERATURE = {
+    "silhouette": 0.10,
+    "base_colors": 0.15,
+    "shading": 0.30,
+    "detail": 0.35,
+    "cleanup": 0.10,
+}
+
+
+class SamplingConfig:
+    """One source of truth for LLM sampling params (spec 0006)."""
+
+    __slots__ = ("temperature", "seed", "top_p")
+
+    def __init__(self, temperature: float = AGENT_TEMPERATURE,
+                 seed: int | None = None, top_p: float | None = None):
+        self.temperature = temperature
+        self.seed = seed
+        self.top_p = top_p
+
+    def __repr__(self):
+        return f"SamplingConfig(temperature={self.temperature}, seed={self.seed}, top_p={self.top_p})"
+
+
+def _seed_from(gen_id) -> int:
+    import zlib
+    return zlib.crc32(str(gen_id).encode()) & 0x7FFFFFFF
+
+
+def resolve_sampling(*, request_temperature=None, request_seed=None,
+                     phase: str | None = None, gen_id=None) -> SamplingConfig:
+    """Resolution order: request > phase > env default. Seed: request > gen_id."""
+    temp = request_temperature
+    if temp is None and phase in PHASE_TEMPERATURE:
+        temp = PHASE_TEMPERATURE[phase]
+    if temp is None:
+        temp = AGENT_TEMPERATURE
+
+    seed = request_seed
+    if seed is None and gen_id is not None:
+        seed = _seed_from(gen_id)
+    return SamplingConfig(temperature=float(temp), seed=seed)
+
 # Ollama config
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODELS = set(m.strip() for m in os.getenv("OLLAMA_MODELS", "").split(",") if m.strip())
@@ -691,27 +739,40 @@ OLLAMA_MODELS = set(m.strip() for m in os.getenv("OLLAMA_MODELS", "").split(",")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
 OPENAI_MODELS_ENV = set(m.strip() for m in os.getenv("OPENAI_MODELS", "").split(",") if m.strip())
 
-def _get_llm(model_name: str, temperature: float = 0.7):
+def _get_llm(model_name: str, sampling: "SamplingConfig | None" = None,
+             temperature: float | None = None):
+    """Build a chat model. All sampling params come from `sampling`
+    (spec 0006); `temperature` is a back-compat shortcut for callers that only
+    have a number."""
+    if sampling is None:
+        sampling = SamplingConfig(temperature=AGENT_TEMPERATURE if temperature is None else temperature)
+    t = sampling.temperature
+    seed = sampling.seed
+
+    def _seed_kw() -> dict:
+        return {"seed": seed} if seed is not None else {}
+
     # Ollama models (OpenAI-compatible API)
     if model_name in OLLAMA_MODELS:
         from langchain_openai import ChatOpenAI
         num_ctx = int(os.getenv("OLLAMA_NUM_CTX", "32768"))
+        opts = {"num_ctx": num_ctx}
+        if seed is not None:
+            opts["seed"] = seed
         return ChatOpenAI(
-            model=model_name,
-            temperature=temperature,
-            base_url=f"{OLLAMA_URL}/v1",
-            api_key="ollama",
-            extra_body={"options": {"num_ctx": num_ctx}},
+            model=model_name, temperature=t,
+            base_url=f"{OLLAMA_URL}/v1", api_key="ollama",
+            extra_body={"options": opts},
         )
 
-    # OpenAI / OpenAI-compatible models (custom names registered via OPENAI_MODELS, or standard prefixes)
+    # OpenAI / OpenAI-compatible models
     if model_name in OPENAI_MODELS_ENV or model_name.startswith(OPENAI_MODEL_PREFIXES):
         from langchain_openai import ChatOpenAI
-        kwargs: dict = {"model": model_name, "temperature": temperature}
+        kwargs: dict = {"model": model_name, "temperature": t, **_seed_kw()}
+        if sampling.top_p is not None:
+            kwargs["top_p"] = sampling.top_p
         if OPENAI_BASE_URL:
             kwargs["base_url"] = OPENAI_BASE_URL
-            # Local OpenAI-compatible servers usually don't require a real key, but ChatOpenAI
-            # still expects something — fall back to a placeholder if OPENAI_API_KEY is unset.
             if not os.getenv("OPENAI_API_KEY"):
                 kwargs["api_key"] = "not-needed"
         return ChatOpenAI(**kwargs)
@@ -721,9 +782,9 @@ def _get_llm(model_name: str, temperature: float = 0.7):
     if gemini_key:
         from langchain_google_genai import ChatGoogleGenerativeAI
         return ChatGoogleGenerativeAI(
-            model=model_name,
-            temperature=temperature,
+            model=model_name, temperature=t,
             google_api_key=gemini_key.strip().strip("'\""),
+            **_seed_kw(),
         )
 
     # Gemini via Vertex AI (service account)
@@ -735,10 +796,9 @@ def _get_llm(model_name: str, temperature: float = 0.7):
         with open(sa_path) as f:
             project = _json.load(f).get("project_id")
     return ChatVertexAI(
-        model_name=model_name,
-        temperature=temperature,
-        project=project,
-        location=os.getenv("GOOGLE_CLOUD_LOCATION", "global"),
+        model_name=model_name, temperature=t,
+        project=project, location=os.getenv("GOOGLE_CLOUD_LOCATION", "global"),
+        **_seed_kw(),
     )
 
 
@@ -878,6 +938,8 @@ def run_agent_stream(
     cancel_check: Any = None,
     seed_mode: str = "off",
     phase: str | None = None,
+    temperature: float | None = None,
+    seed: int | None = None,
 ):
     """
     Run the agent or continue an existing session.
@@ -933,7 +995,9 @@ def run_agent_stream(
     tool_images = vision and _supports_tool_images(model_name)
     tools = make_tools(canvas, vision=vision, full_toolset=full_toolset,
                        reference_img=reference_img, tool_images=tool_images, phase=phase)
-    llm = _get_llm(model_name)
+    sampling = resolve_sampling(request_temperature=temperature, request_seed=seed,
+                                phase=phase, gen_id=gen_id)
+    llm = _get_llm(model_name, sampling)
     checkpointer = get_checkpointer()
     # spec 0004 — keep the target in view (periodic re-anchor) and cap how many
     # preview images the LLM carries at once.
@@ -1096,6 +1160,8 @@ def run_phased_generation(
     existing_pixels: list[list[int]] | None = None,
     cancel_check: Any = None,
     seed_mode: str = "off",
+    temperature: float | None = None,
+    seed: int | None = None,
 ):
     """Drive generation through the fixed phases (spec 0005), one agent call per
     phase on the same LangGraph thread. After the silhouette phase, gate on IoU
@@ -1133,6 +1199,7 @@ def run_phased_generation(
             reference_b64=reference_b64, on_step=on_step, max_steps=budget,
             existing_pixels=pixels, cancel_check=cancel_check,
             seed_mode=(seed_mode if pixels is None else "off"), phase=pname,
+            temperature=temperature, seed=seed,
         )
         pixels = [row[:] for row in canvas.pixels]
 
@@ -1147,7 +1214,7 @@ def run_phased_generation(
                     style_prompt=style_prompt, sprite_type=sprite_type,
                     reference_b64=reference_b64, on_step=on_step, max_steps=budget,
                     existing_pixels=pixels, cancel_check=cancel_check, seed_mode="off",
-                    phase="silhouette",
+                    phase="silhouette", temperature=temperature, seed=seed,
                     message=(f"{message}\n\nThe silhouette only overlaps the reference "
                              f"{score:.0%}. Fix the OUTLINE: add the missing parts, remove "
                              "the extra parts, coarse shapes only. STOP when it matches."),
