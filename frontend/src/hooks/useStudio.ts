@@ -15,6 +15,7 @@ export function useStudio() {
 
   // Generation
   const [pixelData, setPixelData] = useState<number[][] | null>(null);
+  const [seedPixels, setSeedPixels] = useState<number[][] | null>(null);
   const [spriteSize, setSpriteSize] = useState(16);
   const [isGenerating, setIsGenerating] = useState(false);
   const [logs, setLogs] = useState<{ step: string; message: string }[]>([]);
@@ -148,6 +149,7 @@ export function useStudio() {
     systemPrompt?: string;
     mode?: string;
     refine?: boolean;
+    seedMode?: string;
   }) => {
     if (!currentPalette?.colors?.length) {
       setStatus({ type: "error", message: "No palette selected" });
@@ -156,6 +158,7 @@ export function useStudio() {
 
     setSpriteSize(opts.size);
     setPixelData(Array.from({ length: opts.size }, () => Array(opts.size).fill(-1)));
+    setSeedPixels(null);
     setLogs([]);
     setStatus({ type: "generating", message: "Starting..." });
     setIsGenerating(true);
@@ -177,6 +180,7 @@ export function useStudio() {
           sprite_type: opts.spriteType,
           mode: opts.mode || "auto",
           refine: opts.refine || false,
+          seed_mode: opts.seedMode || "soft",
         }),
       });
 
@@ -223,6 +227,7 @@ export function useStudio() {
         break;
       case "pixels":
         setPixelData(data.pixel_data);
+        if (data.seed_pixels) setSeedPixels(data.seed_pixels);
         if (data.gen_id) setActiveGenId(data.gen_id);
         break;
       case "complete":
@@ -403,7 +408,7 @@ export function useStudio() {
     pixelData, spriteSize, isGenerating, logs, status,
     activeGenId, currentGen, generations,
     referenceId, refConfirmed,
-    pendingScore,
+    pendingScore, seedPixels,
 
     // Actions
     loadSettings, loadPalettes, loadHistory,
