@@ -139,6 +139,7 @@ def _load_builtins() -> None:
     from . import sprite_reference   # noqa: F401
     from . import sprite_tileset     # noqa: F401
     from . import sprite_from_photo  # noqa: F401
+    from . import sprite_render      # noqa: F401
 
 
 _load_builtins()

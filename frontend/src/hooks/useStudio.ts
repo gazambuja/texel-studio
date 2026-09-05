@@ -143,6 +143,8 @@ export function useStudio() {
     model: string;
     spriteType: string;
     systemPrompt?: string;
+    mode?: string;
+    refine?: boolean;
   }) => {
     if (!currentPalette?.colors?.length) {
       setStatus({ type: "error", message: "No palette selected" });
@@ -170,6 +172,8 @@ export function useStudio() {
           model: opts.model,
           reference_id: refConfirmed && referenceId ? referenceId : null,
           sprite_type: opts.spriteType,
+          mode: opts.mode || "auto",
+          refine: opts.refine || false,
         }),
       });
 

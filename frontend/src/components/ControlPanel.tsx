@@ -17,6 +17,8 @@ export function ControlPanel({ studio }: { studio: any }) {
   const modelRef = useRef<HTMLSelectElement>(null);
   const sysRef = useRef<HTMLTextAreaElement>(null);
   const refModelRef = useRef<HTMLSelectElement>(null);
+  const modeRef = useRef<HTMLSelectElement>(null);
+  const refineRef = useRef<HTMLInputElement>(null);
 
   const handleGenerate = async () => {
     const prompt = promptRef.current?.value?.trim();
@@ -27,6 +29,8 @@ export function ControlPanel({ studio }: { studio: any }) {
       model: modelRef.current?.value || s.default_model,
       spriteType: typeRef.current?.value || "block",
       systemPrompt: sysRef.current?.value,
+      mode: modeRef.current?.value || "auto",
+      refine: refineRef.current?.checked || false,
     });
   };
 
@@ -276,6 +280,16 @@ export function ControlPanel({ studio }: { studio: any }) {
 
       {/* ── Bottom: Generate Button ── */}
       <div className="p-3" style={{ borderTop: "1px solid var(--border)" }}>
+        <div className="flex gap-1 items-center mb-1.5" style={{ fontSize: "10px" }}>
+          <select ref={modeRef} defaultValue="auto" className="flex-1" title="auto = image-first when a reference is set, agent otherwise">
+            <option value="auto">mode: auto</option>
+            <option value="image-first">image-first</option>
+            <option value="agent">agent</option>
+          </select>
+          <label className="flex items-center gap-1 select-none" style={{ color: "var(--text-dim)" }} title="Run a short LLM cleanup pass after the image-first render">
+            <input type="checkbox" ref={refineRef} /> refine
+          </label>
+        </div>
         <div className="flex gap-1">
           <button
             className="btn btn-primary flex-1"

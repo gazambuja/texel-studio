@@ -62,6 +62,11 @@ def _thread_id_for(gen_id) -> str:
     """Deterministic thread ID per generation. Lets any worker resume any thread."""
     return f"job_{gen_id}"
 
+
+def _has_content(pixels) -> bool:
+    """True if a pixel grid has at least one non-transparent cell."""
+    return bool(pixels) and any(v != -1 for row in pixels for v in row)
+
 # ── PostHog LLM Analytics (optional) ──
 
 _posthog_client = None
@@ -759,8 +764,22 @@ def run_agent_stream(
     checkpointer = get_checkpointer()
     agent = create_react_agent(llm, tools, checkpointer=checkpointer)
 
+    # A fresh thread that was handed a pre-filled canvas (e.g. the image-first
+    # pipeline's refine pass) is editing, not creating from scratch.
+    seeded = is_new and _has_content(existing_pixels)
+
     if is_new:
         sys_prompt = build_system_prompt(message, palette, size, style_prompt, reference_b64 is not None, sprite_type, model_name)
+        if seeded:
+            sys_prompt += f"""
+
+IMPORTANT — THE CANVAS IS NOT BLANK.
+It already contains a faithful first-pass conversion of the reference. Your job
+is to REFINE it, not rebuild it. Call view_canvas first to see the current
+state, then make only the changes the request asks for.
+
+CURRENT CANVAS STATE:
+{canvas.to_grid_string()}"""
         user_parts = [{"type": "text", "text": sys_prompt}]
         if reference_b64:
             user_parts.append({

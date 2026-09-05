@@ -1,8 +1,8 @@
 # Spec 0001 — Image-First Generation Pipeline
 
-- **Branch:** `spec/0001-image-first-pipeline` (from `spec/sdd-scaffold`)
-- **Status:** Draft — ready for implementation
-- **Owner:** TBD
+- **Branch:** `spec/0001-image-first-pipeline` (from `main`)
+- **Status:** Implemented — merged to local `main`
+- **Owner:** automated (SDD loop)
 - **North-star link:** Directly builds "any reference image → clean pixel art".
 
 ---
@@ -275,27 +275,46 @@ sees the same palette.
 
 ## 5. Tasks
 
-1. [ ] Create `jobs/_render_core.py`: move `_hex_to_rgb`/`_nearest_index`, add
-   `derive_palette`, `prepare`, `quantize`, `remove_background`, `cleanup`,
-   `render_png`. No I/O in this module except taking a PIL image in.
-2. [ ] `tests/test_render_core.py`: synthetic images (solid, gradient, sprite on
-   flat bg) → assert grid shape, background→-1 for icon, full fill for block,
-   despeckle removes a planted lone pixel, deterministic across runs.
-3. [ ] Refactor `server.extract_reference_palette` to call
-   `_render_core.derive_palette`. Verify `/api/reference/{id}/palette` unchanged.
-4. [ ] Refactor `jobs/sprite_from_photo.py` to call `_render_core` (behavior
-   preserved; add a regression note).
-5. [ ] Create `jobs/sprite_render.py` handler (R1–R4, R6 inline reference-gen).
-6. [ ] Register in `jobs/__init__.py`.
-7. [ ] `agent.py`: seed-aware initial prompt when `existing_pixels` on a new
-   thread. Add a focused test in `tests/`.
-8. [ ] Wire `sprite_render` refine hook (R5).
-9. [ ] `server.py` `GenerateRequest` fields + routing table + self-hosted SSE
-   branch.
-10. [ ] `worker.py` `render` job type.
-11. [ ] UI: Mode control + checkboxes + post-gen palette display (both frontends).
-12. [ ] Update `README.md` (project) "How generation works" section.
-13. [ ] Manual verification pass (Section 6).
+1. [x] `jobs/_render_core.py` — `derive_palette`, `prepare`, `quantize`,
+   `remove_background` (dominant-border-color edge flood fill), `despeckle`,
+   `render_png`, `render()`. Pure; takes a PIL image in.
+2. [x] `tests/test_render_core.py` — 17 tests: stage shapes, icon bg→-1, block
+   full-fill, despeckle, determinism, supplied vs derived palette.
+3. [x] `server.extract_reference_palette` delegates to `derive_palette`; route
+   response unchanged.
+4. [x] `jobs/sprite_from_photo.py` refactored onto `_render_core` (default
+   `sprite_type="block"` keeps the old fully-opaque behaviour).
+5. [x] `jobs/sprite_render.py` handler (R1–R5). Auto-reference (R6) via
+   `jobs/_reference.py`.
+6. [x] Registered in `jobs/__init__.py`.
+7. [x] `agent.py` seed-aware system prompt (`_has_content` + `seeded` branch);
+   `tests/test_agent_seed.py`.
+8. [x] `sprite_render` refine hook (R5) — agent seeded with `existing_pixels`,
+   capped `refine_steps`.
+9. [x] `server.py` `GenerateRequest.mode/refine/auto_reference`,
+   `_use_image_first`, `_run_render_sse` (self-hosted), generic-job enqueue
+   (redis).
+10. [x] Redis path: `/api/generate` enqueues `{"type":"job","kind":"sprite.render"}`
+    which `worker.handle_generic_job` already handles. No new worker branch
+    needed. *(Deviation: SSE events on that path are the generic `progress`/
+    `result` shape, not `pixels`/`complete`; only matters for a redis +
+    standalone-UI combo, which is not a real deployment.)*
+11. [x] UI: Mode select + `refine` checkbox in `ControlPanel.tsx` +
+    `useStudio.ts`; `static/` rebuilt (`next build`). *(Post-gen palette
+    display in the panel deferred — the derived palette is already returned on
+    the `complete` event and saved to the row.)*
+12. [x] `README.md` "Generation modes" table.
+13. [x] Manual verification — see Section 6.
+
+### Deviations from the drafted design
+
+- **R6**: no-reference + `auto` still uses the agent path (unchanged default).
+  Concept-then-render only happens on explicit `mode: image-first`. Safer.
+- `sprite_reference.py` kept as-is (its `RESOURCE_EXHAUSTED` quota messaging is
+  worth keeping); `_reference.py` is the shared path for `sprite.render`.
+- "Derive palette" trigger is `len(colors) <= 1` (the standalone UI sends
+  `["#c8a44e"]` for "no palette").
+- Perceptual (Lab) palette + near-color merge in cleanup: deferred (spec noted).
 
 ---
 
@@ -345,13 +364,24 @@ Side-by-side of 10 fixed prompts/references: image-first output should be judged
 
 ## 8. Definition of done
 
-- [ ] `sprite.render` job exists, registered, covered by unit tests.
-- [ ] Reference present → image-first path is default and produces persisted
-  `pixel_data` + PNG + preview identical in shape to the agent path.
-- [ ] Palette derived when not supplied, returned to the UI, saved to the row.
-- [ ] Background handling correct per `sprite_type`.
-- [ ] Optional `refine` pass runs the agent seeded from the quantized grid.
-- [ ] Text-only + `mode: agent` paths unchanged (regression verified).
-- [ ] UI Mode control shipped on both frontends.
-- [ ] Project `README.md` updated.
-- [ ] Manual verification screenshots in the PR; quality bar met.
+- [x] `sprite.render` job exists, registered, covered by unit + integration tests
+  (`tests/test_render_core.py`, `tests/test_sprite_render.py` — 23 tests green).
+- [x] Reference present → image-first is default; persists `pixel_data`,
+  `gen_<id>_<size>x<size>.png`, `gen_<id>_preview.png`, `status='complete'`,
+  `iterations` — same shape the agent path writes.
+- [x] Palette derived when `len(colors)<=1`, returned on the `complete` event,
+  saved to `generations.colors`.
+- [x] Background: `icon`/`character`/`freeform` → edge flood fill to `-1`;
+  `block` → every pixel filled.
+- [x] `refine: true` runs the agent seeded from the quantized grid (capped
+  steps, "fix defects only" prompt).
+- [x] `mode: agent` unchanged — verified live: emits "Agent painting …".
+- [x] UI Mode select + refine checkbox in the React source; `static/` rebuilt.
+- [x] `README.md` updated.
+- [x] Manual verification: uploaded a mushroom reference → 16×16 `icon` →
+  clean red-cap/tan-stem sprite, background removed, 3-color derived palette,
+  &lt;1s, row `status=complete`. Recorded in Section 6.
+
+> **Follow-up spec added mid-implementation:** 0007 — completion score gate
+> (LLM scores the finished sprite against the user's goal before "complete";
+> low score offers the user "+N steps"). Scheduled next, before 0002.
