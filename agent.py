@@ -19,9 +19,10 @@ from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).parent / ".env", override=True)
 
 
 # ── Checkpointer factory ──
@@ -573,9 +574,14 @@ def _get_llm(model_name: str, temperature: float = 0.7):
         return ChatOpenAI(**kwargs)
 
     # Gemini via API key
-    if os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
+    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if gemini_key:
         from langchain_google_genai import ChatGoogleGenerativeAI
-        return ChatGoogleGenerativeAI(model=model_name, temperature=temperature)
+        return ChatGoogleGenerativeAI(
+            model=model_name,
+            temperature=temperature,
+            google_api_key=gemini_key.strip().strip("'\""),
+        )
 
     # Gemini via Vertex AI (service account)
     import json as _json

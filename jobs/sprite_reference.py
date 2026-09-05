@@ -58,6 +58,13 @@ class SpriteReferenceHandler(JobHandler):
                     contents=[ref_prompt],
                 )
         except Exception as e:
+            err_msg = str(e)
+            if "RESOURCE_EXHAUSTED" in err_msg and "limit: 0" in err_msg:
+                yield error(
+                    "Google Gemini image models have no free tier quota (limit: 0). "
+                    "Enable billing in Google AI Studio or upload a reference image manually."
+                )
+                return
             yield error(f"Reference generation failed: {e}")
             return
 

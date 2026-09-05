@@ -189,7 +189,7 @@ export function ControlPanel({ studio }: { studio: any }) {
             <div>
               <div style={{ fontSize: "9px", color: "var(--text-faint)", marginBottom: 3 }}>size</div>
               <select ref={sizeRef} defaultValue="16">
-                {[8, 16, 32, 64].map((n) => (
+                {[8, 16, 32, 64, 128].map((n) => (
                   <option key={n} value={n}>{n}x{n}</option>
                 ))}
               </select>

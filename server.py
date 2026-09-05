@@ -42,7 +42,7 @@ class AssessmentResponse(BaseModel):
 
 # ── Config ──
 
-load_dotenv()
+load_dotenv(Path(__file__).parent / ".env", override=True)
 load_dotenv(Path(__file__).parent.parent / "sprite-forge" / ".env")  # fallback to sprite-forge env
 
 # Set GOOGLE_APPLICATION_CREDENTIALS for LangChain/Vertex AI
@@ -93,6 +93,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 def get_client():
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if api_key:
+        api_key = api_key.strip().strip("'\"")
         return genai.Client(api_key=api_key)
 
     # Try service account JSON content as env var (for Railway/Docker where you can't upload files)
@@ -844,6 +845,14 @@ def generate_reference(data: ReferenceRequest):
         import traceback
         tb = traceback.format_exc()
         print(f"[REFERENCE ERROR]\n{tb}")
+        err_msg = str(e)
+        if "RESOURCE_EXHAUSTED" in err_msg and "limit: 0" in err_msg:
+            friendly = (
+                "Google Gemini image generation models (e.g. gemini-3.1-flash-image-preview) have no free tier quota (limit: 0). "
+                "You need a Google AI Studio account with billing enabled (Pay-As-You-Go) to generate reference images. "
+                "Alternatively, you can upload your own reference image using the 'Upload' button or generate sprites directly without a reference."
+            )
+            return JSONResponse({"error": f"{friendly}\n\n{err_msg}"}, status_code=500)
         return JSONResponse({"error": f"{str(e)}\n\n{tb}"}, status_code=500)
 
 @app.post("/api/reference/upload")
@@ -959,8 +968,8 @@ def get_generation(gen_id: int):
 
 @app.post("/api/generate")
 async def start_generation(data: GenerateRequest):
-    if data.size not in (8, 16, 32, 64):
-        raise HTTPException(400, "Size must be 8, 16, 32, or 64")
+    if data.size not in (8, 16, 32, 64, 128):
+        raise HTTPException(400, "Size must be 8, 16, 32, 64, or 128")
     if not data.colors:
         raise HTTPException(400, "Colors array is required")
 
