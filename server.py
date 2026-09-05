@@ -548,7 +548,7 @@ def _wait_for_result(sub):
 
 def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = False,
                    colors: list[str] | None = None, score_cfg=None, max_steps: int | None = None,
-                   seed_mode: str = "off"):
+                   seed_mode: str = "off", workflow: str = "freeform"):
     """Shared SSE generator for initial generation and chat continuation.
 
     `score_cfg` (a scoring.ScoreConfig) enables the completion score gate: when
@@ -558,7 +558,7 @@ def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = Fal
     """
     import threading
     import queue as queue_mod
-    from agent import run_agent_stream as agent_run, cleanup_session
+    from agent import run_agent_stream as agent_run, run_phased_generation, cleanup_session
     import scoring
 
     db = get_db()
@@ -598,6 +598,10 @@ def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = Fal
 
     def on_step(canvas, step_type, msg):
         step_count[0] += 1
+        if step_type == "phase":
+            event_queue.put(sse_event("phase", {"phase": msg, "gen_id": generation_id}))
+            event_queue.put(sse_event("log", {"step": f"phase_{step_count[0]}", "message": f"Phase: {msg}"}))
+            return
         event_queue.put(sse_event("log", {"step": f"{step_type}_{step_count[0]}", "message": msg}))
 
         # Send pixel snapshots on tool_result (AFTER execution, canvas is updated)
@@ -622,6 +626,7 @@ def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = Fal
             cur_msg = message
             filename = f"gen_{generation_id}_{size}x{size}.png"
 
+            round_no = 0
             while True:
                 agent_kwargs = dict(
                     gen_id=generation_id,
@@ -638,7 +643,13 @@ def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = Fal
                 )
                 if max_steps is not None:
                     agent_kwargs["max_steps"] = max_steps
-                canvas = agent_run(**agent_kwargs)
+                # Phased workflow only for the first pass of a fresh generation;
+                # score-gate "keep drawing" rounds and chat edits stay freeform.
+                if workflow == "phased" and round_no == 0 and not is_continuation:
+                    canvas = run_phased_generation(**agent_kwargs)
+                else:
+                    canvas = agent_run(**agent_kwargs)
+                round_no += 1
 
                 pixel_data = [row[:] for row in canvas.pixels]
                 current_pixels = pixel_data
@@ -903,6 +914,8 @@ class GenerateRequest(BaseModel):
     auto_reference: bool = True   # generate a concept image when none was supplied
     # spec 0002 — reference-seeded canvas (agent path)
     seed_mode: str = "soft"       # "soft" | "locked" | "off"
+    # spec 0005 — silhouette-first phased workflow (agent path)
+    workflow: Optional[str] = None   # "phased" | "freeform" ; default: phased iff reference
     # spec 0007 — completion score gate
     score: bool = True            # score the finished sprite against the prompt
     score_threshold: Optional[int] = None
@@ -1207,6 +1220,7 @@ async def start_generation(data: GenerateRequest):
                 "external_id": data.external_id,
                 "is_continuation": False,
                 "seed_mode": data.seed_mode,
+                "workflow": (data.workflow or ("phased" if data.reference_id else "freeform")),
             }))
         return StreamingResponse(
             _sse_from_pubsub(sub),
@@ -1220,8 +1234,10 @@ async def start_generation(data: GenerateRequest):
     if image_first:
         generator = _run_render_sse(gen_id, data)
     else:
+        workflow = data.workflow or ("phased" if data.reference_id else "freeform")
         generator = _run_agent_sse(gen_id, data.prompt, colors=data.colors,
-                                   score_cfg=score_cfg, seed_mode=data.seed_mode)
+                                   score_cfg=score_cfg, seed_mode=data.seed_mode,
+                                   workflow=workflow)
     return StreamingResponse(
         generator,
         media_type="text/event-stream",

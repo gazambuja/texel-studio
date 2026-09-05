@@ -19,6 +19,7 @@ class SpriteGenerateParams(BaseModel):
     system_prompt: Optional[str] = None
     reference_id: Optional[str] = None
     seed_mode: str = "soft"       # spec 0002 — "soft" | "locked" | "off"
+    workflow: Optional[str] = None   # spec 0005 — "phased" | "freeform"
     # spec 0007 — completion score gate (headless: auto-continue on low score)
     score: bool = True
     score_threshold: Optional[int] = None
@@ -57,6 +58,9 @@ class SpriteGenerateHandler(JobHandler):
 
         def on_step(canvas, step_type, msg):
             step_count[0] += 1
+            if step_type == "phase":
+                bridge.emit(log(f"Phase: {msg}", step=f"phase_{step_count[0]}", phase=msg))
+                return
             bridge.emit(log(msg, step=f"{step_type}_{step_count[0]}"))
             if step_type == "tool_result" and (step_count[0] - last_pixel_step[0] >= 1):
                 last_pixel_step[0] = step_count[0]
@@ -68,9 +72,11 @@ class SpriteGenerateHandler(JobHandler):
 
         def worker():
             import scoring
+            from agent import run_phased_generation
 
             # Headless: default to auto-continue (no user to ask).
             cfg = scoring.ScoreConfig.from_request(params, interactive=False)
+            workflow = params.workflow or ("phased" if params.reference_id else "freeform")
             filename = f"gen_{external_id}_{size}x{size}.png"
             msg = params.prompt
             existing = None
@@ -78,7 +84,8 @@ class SpriteGenerateHandler(JobHandler):
             decision = None
 
             while True:
-                canvas = run_agent_stream(
+                _run = run_phased_generation if (workflow == "phased" and rounds == 0) else run_agent_stream
+                canvas = _run(
                     gen_id=external_id,
                     message=msg,
                     palette=params.colors,

@@ -288,3 +288,18 @@ def render(
         grid = despeckle(grid)
 
     return grid, palette
+
+
+# ── silhouette compare (spec 0005) ──
+
+def silhouette_of(grid: Grid) -> set:
+    """Set of (x, y) that are opaque (palette index >= 0)."""
+    return {(x, y) for y, row in enumerate(grid) for x, v in enumerate(row) if v >= 0}
+
+
+def iou(a: set, b: set) -> float:
+    """Intersection-over-union of two pixel sets. 1.0 when both empty."""
+    if not a and not b:
+        return 1.0
+    union = len(a | b)
+    return len(a & b) / union if union else 0.0

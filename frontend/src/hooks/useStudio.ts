@@ -16,6 +16,7 @@ export function useStudio() {
   // Generation
   const [pixelData, setPixelData] = useState<number[][] | null>(null);
   const [seedPixels, setSeedPixels] = useState<number[][] | null>(null);
+  const [currentPhase, setCurrentPhase] = useState<string | null>(null);
   const [spriteSize, setSpriteSize] = useState(16);
   const [isGenerating, setIsGenerating] = useState(false);
   const [logs, setLogs] = useState<{ step: string; message: string }[]>([]);
@@ -150,6 +151,7 @@ export function useStudio() {
     mode?: string;
     refine?: boolean;
     seedMode?: string;
+    workflow?: string;
   }) => {
     if (!currentPalette?.colors?.length) {
       setStatus({ type: "error", message: "No palette selected" });
@@ -159,6 +161,7 @@ export function useStudio() {
     setSpriteSize(opts.size);
     setPixelData(Array.from({ length: opts.size }, () => Array(opts.size).fill(-1)));
     setSeedPixels(null);
+    setCurrentPhase(null);
     setLogs([]);
     setStatus({ type: "generating", message: "Starting..." });
     setIsGenerating(true);
@@ -181,6 +184,7 @@ export function useStudio() {
           mode: opts.mode || "auto",
           refine: opts.refine || false,
           seed_mode: opts.seedMode || "soft",
+          workflow: opts.workflow || null,
         }),
       });
 
@@ -225,6 +229,10 @@ export function useStudio() {
         setStatus({ type: "generating", message: data.message });
         setLogs((prev) => [...prev, { step: data.step, message: data.message }]);
         break;
+      case "phase":
+        setCurrentPhase(data.phase);
+        setStatus({ type: "generating", message: `Phase: ${data.phase}` });
+        break;
       case "pixels":
         setPixelData(data.pixel_data);
         if (data.seed_pixels) setSeedPixels(data.seed_pixels);
@@ -238,6 +246,7 @@ export function useStudio() {
             : "Complete! Use chat to request edits.",
         });
         setPendingScore(null);
+        setCurrentPhase(null);
         setCurrentGen({ id: data.id, image_path: data.image_path } as Generation);
         setActiveGenId(data.id);
         break;
@@ -408,7 +417,7 @@ export function useStudio() {
     pixelData, spriteSize, isGenerating, logs, status,
     activeGenId, currentGen, generations,
     referenceId, refConfirmed,
-    pendingScore, seedPixels,
+    pendingScore, seedPixels, currentPhase,
 
     // Actions
     loadSettings, loadPalettes, loadHistory,
