@@ -22,6 +22,18 @@ https://github.com/user-attachments/assets/63e2fdde-3f15-4ffd-8b27-60acaef9a9c5
 5. **Chat to edit** — tell the agent "make the top darker" and it continues painting
 6. **Export** — native size PNG, upscaled 512px, or full autotile tileset (16 variants)
 
+### Generation modes
+
+| `mode` | Behaviour |
+|--------|-----------|
+| `auto` (default) | **Image-first** when a reference image is present (fast, deterministic: resize → quantize to palette → background/despeckle cleanup), otherwise the step-by-step **agent**. |
+| `image-first` | Always run the deterministic pipeline. With no reference, a concept image is generated first. |
+| `agent` | Always the step-by-step painting agent. |
+
+Set `refine: true` to run a short agent cleanup pass **seeded from** the
+image-first result (fixes stray pixels / broken edges without redrawing).
+When no palette is supplied, one is derived from the reference.
+
 ## Why not diffusion?
 
 | | Diffusion generators | **Texel Studio** |
