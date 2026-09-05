@@ -19,6 +19,7 @@ class SpriteChatParams(BaseModel):
     sprite_type: str = "block"
     system_prompt: Optional[str] = None
     pixel_data: Optional[list[list[int]]] = None         # current canvas state
+    reference_id: Optional[str] = None                   # spec 0004 — keep the reference in view
 
 
 @register_job("sprite.chat")
@@ -30,9 +31,12 @@ class SpriteChatHandler(JobHandler):
         from server import (
             DEFAULT_MODEL,
             DEFAULT_SYSTEM_PROMPT,
+            load_reference_b64,
             upscale_image,
         )
         import storage
+
+        ref_b64 = load_reference_b64(params.reference_id)
 
         size = params.size
         model = params.model or DEFAULT_MODEL
@@ -67,7 +71,7 @@ class SpriteChatHandler(JobHandler):
                 model_name=model,
                 style_prompt=system_prompt,
                 sprite_type=params.sprite_type,
-                reference_b64=None,
+                reference_b64=ref_b64,
                 on_step=on_step,
                 cancel_check=ctx.cancel_check,
                 existing_pixels=params.pixel_data,

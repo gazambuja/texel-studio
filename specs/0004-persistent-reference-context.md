@@ -1,7 +1,7 @@
 # Spec 0004 — Persistent Reference Context
 
-- **Branch:** `spec/0004-persistent-reference-context` (from `spec/0003-visual-preview-overhaul`)
-- **Status:** Planned
+- **Branch:** `spec/0004-persistent-reference-context` (from `main`, after 0003)
+- **Status:** Implemented — merged to local `main`
 - **Depends on:** 0003 (preview image plumbing, shared preview module).
 - **North-star link:** The agent keeps comparing its work to the reference for
   the whole session, not just at step 1.
@@ -62,23 +62,62 @@ the reference, which they currently do not (`server.py:561` passes
 - `sprite_chat.py` + `server._run_agent_sse` + `worker.py`: stop nulling
   `ref_b64` on continuation; load from the row.
 
-## 5. Tasks (outline)
+## 5. Tasks
 
-1. [ ] `view_reference` tool + test.
-2. [ ] Re-anchor injection with the "recently shown" skip rule.
-3. [ ] Image-part pruning (cap = 3) + test that text is preserved.
-4. [ ] Continuation reference loading in all 3 call sites.
-5. [ ] Config: `REANCHOR_EVERY`, `MAX_IMAGE_PARTS`.
-6. [ ] Verification.
+1. [x] `view_reference()` tool — reference | current side by side (multimodal
+   for Gemini-class; text for OpenAI/non-vision). Added to the toolset only when
+   a reference exists. `tests/test_context.py`.
+2. [x] Re-anchor: `_make_context_hook` appends an **ephemeral text** reminder
+   (target subject + "call view_reference()") every `REANCHOR_EVERY` model
+   calls, skipped when an image appeared in the last 2 messages.
+3. [x] Image pruning: same hook keeps the newest `MAX_IMAGE_PARTS` (3)
+   image-bearing messages; older image blocks collapse to
+   `[preview image removed to save context]` (text kept); message 0 exempt.
+   Done via `llm_input_messages` — the persisted thread keeps the full history,
+   the LLM just sees a trimmed view each call.
+4. [x] Continuations load the reference: `server._run_agent_sse` (dropped the
+   `not is_continuation` guard), `worker.handle_generate`, `jobs/sprite_chat`
+   (new `reference_id` param, `/api/chat` forwards `gen["reference_id"]`), and
+   `run_agent_stream`'s continuation follow-up message now attaches the
+   reference image.
+5. [x] Config: `REANCHOR_EVERY` (8), `MAX_IMAGE_PARTS` (3) — env-overridable in
+   `agent.py`.
+6. [x] Verification — Section 6.
+
+### Design note — why not the spec's mechanism
+
+The drafted R3 ("push a `HumanMessage` into the next `agent.stream` input") does
+not work: `agent.stream()` runs the whole ReAct loop in one call, so there is no
+"next input" to push into mid-run. And 0003 already proved that injecting an
+**image** `HumanMessage` mid-conversation makes Gemini re-call view tools in a
+loop. So the re-anchor is a **text-only** nudge inside a `pre_model_hook`, and
+the reference image itself stays available through 0003's `view_canvas` triptych
++ the new `view_reference()` tool.
 
 ## 6. Verification
 
-- Unit: after 20 simulated steps, message list has ≤ 3 image parts; re-anchor
-  present at steps 8 and 16 (unless recently shown).
-- Manual: long refine session — dump messages, confirm reference re-appears
-  periodically; sprite stays on-subject vs 0003 baseline.
-- Continuation: "make the hat red" on a reference-backed sprite → agent
-  references the original correctly.
+- **Unit (`tests/test_context.py`, 7 tests; 61 total green):**
+  - 6 preview images in history → the hook's `llm_input_messages` carries
+    ≤ `MAX_IMAGE_PARTS` + the exempt message 0; message 0's reference image is
+    untouched; a collapsed message still carries its text.
+  - Re-anchor `HumanMessage` present when `ai_count % REANCHOR_EVERY == 0` and no
+    recent image; absent when the last message is an image.
+  - `view_reference` returns two image blocks (reference + current) for a
+    vision model, is omitted entirely with no reference, text-only for OpenAI.
+- **Live:** Gemini agent run (`run_agent_stream`, `REANCHOR_EVERY=4`, 16px) with
+  the hook active → 13 tool calls, drew the shape, completed, **no loop**
+  (confirming `llm_input_messages` pruning + ephemeral nudge don't wedge the
+  ReAct loop the way 0003's image-hook did).
+- **Continuation:** `view_reference` is present in the toolset on a continuation
+  because `reference_b64` now flows through; `_run_agent_sse` /
+  `worker.handle_generate` / `sprite_chat` load it from the row.
+
+### Token note
+
+Before 0004 preview images accumulated unbounded across a run. The hook caps the
+LLM-visible set at 3 (+message 0), so a long session's per-call image payload is
+now **bounded regardless of step count** — strictly fewer tokens on any run past
+~4 `view_canvas` calls. The re-anchor adds ~30 tokens once per 8 calls.
 
 ## 7. Risks
 
@@ -88,8 +127,13 @@ the reference, which they currently do not (`server.py:561` passes
 
 ## 8. Definition of done
 
-- [ ] `view_reference()` available and returns a real image part.
-- [ ] Reference re-anchored every N steps with the skip rule.
-- [ ] Continuations load the reference.
-- [ ] Live context capped at 3 image parts, text intact, unit-tested.
-- [ ] Token delta measured in the PR.
+- [x] `view_reference()` returns real image parts (reference + current) for
+  vision providers; present only when a reference exists.
+- [x] Text re-anchor every `REANCHOR_EVERY` model calls with the "recently
+  shown an image" skip rule.
+- [x] Continuations (`sprite.chat`, `is_continuation`, `/continue_drawing`) load
+  the reference and pass it through.
+- [x] LLM-visible context capped at `MAX_IMAGE_PARTS` images + message 0; older
+  image blocks collapse to a text stub; unit-tested.
+- [x] Token behaviour characterised (bounded per-call image payload; see note).
+  61 tests green; live run confirms no ReAct-loop regression.

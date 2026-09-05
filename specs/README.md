@@ -45,7 +45,7 @@ One spec at a time. Each spec is implemented on its own branch cut from **local
 spec starts. Local `main` is never pushed — `origin` is upstream
 (`EYamanS/texel-studio`), `fork` is the contributor's copy.
 
-Execution order: **0001 → 0007 → 0002 → 0003 → 0004 → 0005 → 0006.**  (0001, 0007, 0002, 0003 done.)
+Execution order: **0001 → 0007 → 0002 → 0003 → 0004 → 0005 → 0006.**  (0001, 0007, 0002, 0003, 0004 done.)
 (0007 was requested during 0001 and is prioritized ahead of 0002.)
 
 | Spec | Branch | Cut from | Theme |
@@ -54,7 +54,7 @@ Execution order: **0001 → 0007 → 0002 → 0003 → 0004 → 0005 → 0006.**
 | 0007 | `spec/0007-completion-score-gate` | `main` (after 0001) | LLM scores the finished sprite vs the goal; low score → offer "+N steps" — **done** |
 | 0002 | `spec/0002-reference-seeded-canvas` | `main` (after 0007) | Agent starts from the quantized reference, not blank — **done** |
 | 0003 | `spec/0003-visual-preview-overhaul` | `main` (after 0002) | Give the agent a preview it can actually read — **done** |
-| 0004 | `spec/0004-persistent-reference-context` | `main` (after 0003) | Keep the reference in front of the agent |
+| 0004 | `spec/0004-persistent-reference-context` | `main` (after 0003) | Keep the reference in front of the agent — **done** |
 | 0005 | `spec/0005-silhouette-first-workflow` | `main` (after 0004) | Structured phases: silhouette → fill → detail |
 | 0006 | `spec/0006-deterministic-drawing-config` | `main` (after 0005) | Sampling/temperature tuned per phase |
 

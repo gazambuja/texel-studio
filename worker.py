@@ -79,7 +79,7 @@ def handle_generate(job: dict):
     seed_mode = job.get("seed_mode", "off")
 
     type_config = SPRITE_TYPES.get(sprite_type, SPRITE_TYPES["block"])
-    ref_b64 = load_reference_b64(reference_id) if reference_id and not is_continuation else None
+    ref_b64 = load_reference_b64(reference_id) if reference_id else None  # spec 0004 — continuations too
 
     if not is_continuation:
         publish_event(job_id, sse_event("log", {"step": "start", "message": f"Agent painting {size}x{size} with {model}..."}))
