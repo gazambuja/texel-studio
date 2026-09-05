@@ -1,7 +1,7 @@
 # Spec 0005 — Silhouette-First Workflow
 
-- **Branch:** `spec/0005-silhouette-first-workflow` (from `spec/0004-persistent-reference-context`)
-- **Status:** Planned
+- **Branch:** `spec/0005-silhouette-first-workflow` (from `main`, after 0004)
+- **Status:** Implemented — merged to local `main`
 - **Depends on:** 0002 (silhouette mask), 0003 (preview), 0004 (reference in context).
 - **North-star link:** Structured phases produce readable sprites instead of a
   freeform poke-at-pixels loop.
@@ -70,24 +70,49 @@ THE SYSTEM SHALL drive these phases in order:
 - New request field `workflow`; thread through as usual.
 - Tool gating: `make_tools(..., phase=...)` filters the returned tool list.
 
-## 5. Tasks (outline)
+## 5. Tasks
 
-1. [ ] `iou()` + mask compare in `_render_core` + tests.
-2. [ ] Phase prompt table + phase-filtered `make_tools`.
-3. [ ] Orchestrator: per-phase agent invocation, carrying pixels + thread.
-4. [ ] Silhouette gate with retry cap + mismatch message (uses 0003 preview).
-5. [ ] Per-phase budgets; `finish` gating.
-6. [ ] `phase` in progress events; UI phase tracker.
-7. [ ] `workflow` request field + routing.
-8. [ ] Verification.
+1. [x] `_render_core.silhouette_of(grid)` + `iou(a, b)`.
+2. [x] `agent.AGENT_PHASES` (name, budget weight, instruction) for the 5 phases;
+   `make_tools(phase=...)` → `_filter_phase_tools`: `silhouette` gets coarse
+   shapes only (no `draw_pixel*`, no `finish`); `base_colors`/`shading` add
+   pixel + noise tools but still no `finish`; `detail`/`cleanup` get everything
+   incl. `finish`. `view_canvas`/`view_reference`/`get_pixel` always allowed.
+3. [x] `agent.run_phased_generation(...)` — one `run_agent_stream` call per
+   phase on the same `gen_id` (thread persists), carrying the grid forward via
+   `existing_pixels`, each with `phase=` and `max_steps = round(global * weight)`.
+4. [x] Silhouette gate: after phase 1, `iou(silhouette_of(grid), ref_mask)` vs
+   `SILHOUETTE_IOU_SEEDED` (0.85) / `SILHOUETTE_IOU_BLANK` (0.70); below → re-run
+   the silhouette phase with a "%-overlap, fix the outline" message, up to
+   `SILHOUETTE_RETRIES` (2).
+5. [x] Per-phase budgets (weights sum ~1.0, min 6 steps); `finish` only exists
+   in the toolset from the `detail` phase on.
+6. [x] `on_step(canvas, "phase", name)` → `phase` SSE event in `_run_agent_sse`
+   + `worker` + `sprite_generate`; UI phase tracker chips in `ControlPanel`.
+7. [x] `GenerateRequest.workflow` (`phased` | `freeform`, default: `phased` iff
+   a reference is present) → `_run_agent_sse` / redis payload / `worker` /
+   `SpriteGenerateParams`. Phased only on the first pass of a fresh generation —
+   score-gate "keep drawing" rounds and chat edits stay freeform.
+8. [x] Verification — Section 6.
+
+### Deviations
+
+- `sprite.render`'s optional `refine` pass stays freeform (it is a ≤20-step
+  localised defect fix, not a from-scratch build).
+- The gate only guards silhouette→rest; phases 2–5 advance on the model
+  stopping or the budget. Adding gates there is a later refinement.
 
 ## 6. Verification
 
-- Unit: gate holds the agent when IoU low, releases when high; budget exhaustion
-  advances + logs.
-- Manual: 10 fixed reference tasks in phased mode vs freeform — phased should
-  win on "silhouette matches" and "reads at 1×" judgments.
-- Regression: `workflow: freeform` == 0004 behavior.
+- **Unit (`tests/test_phases.py`, 7 tests; 68 total green):** `iou` /
+  `silhouette_of`; phase tool filtering (silhouette drops pixel + finish tools,
+  detail keeps finish); `run_phased_generation` (stubbed agent) calls exactly
+  once per phase in order, emits the 5 `phase` markers, carries the grid
+  between phases, and re-runs the silhouette phase twice when IoU stays low.
+- **Live (`run_phased_generation`, real Gemini):** _see PR notes_ — phases fire
+  in order, budgets respected, sprite completes.
+- **Regression:** `workflow: freeform` routes straight to `run_agent_stream`
+  (the 0004 path); default is `freeform` when there is no reference.
 
 ## 7. Risks
 
@@ -99,8 +124,12 @@ THE SYSTEM SHALL drive these phases in order:
 
 ## 8. Definition of done
 
-- [ ] Five-phase orchestration with a working silhouette gate.
-- [ ] Per-phase budgets and `finish` gating enforced.
-- [ ] UI phase tracker.
-- [ ] `freeform` opt-out matches pre-0005.
-- [ ] Quality comparison recorded in the PR.
+- [x] `run_phased_generation` drives the 5 phases in order on one thread with an
+  IoU silhouette gate + bounded retries.
+- [x] Per-phase step budgets; `finish` absent from the toolset before `detail`.
+- [x] UI phase-tracker chips (`ControlPanel`), fed by `phase` SSE events.
+- [x] `workflow: freeform` (and the no-reference default) == pre-0005 path.
+- [x] 68 tests green; live phased run verified.
+- [ ] The full "10 fixed tasks vs freeform" quality bar is deferred to a
+  dedicated eval pass once 0006 (sampling) lands — the pieces (0003 preview,
+  0004 context, 0005 phases, 0006 determinism) are meant to be judged together.

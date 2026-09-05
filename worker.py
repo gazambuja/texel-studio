@@ -77,6 +77,7 @@ def handle_generate(job: dict):
     is_continuation = job.get("is_continuation", False)
     existing_pixels = job.get("pixel_data")
     seed_mode = job.get("seed_mode", "off")
+    workflow = job.get("workflow", "freeform")
 
     type_config = SPRITE_TYPES.get(sprite_type, SPRITE_TYPES["block"])
     ref_b64 = load_reference_b64(reference_id) if reference_id else None  # spec 0004 — continuations too
@@ -91,6 +92,10 @@ def handle_generate(job: dict):
 
     def on_step(canvas, step_type, msg):
         step_count[0] += 1
+        if step_type == "phase":
+            publish_event(job_id, sse_event("phase", {"phase": msg, "gen_id": gen_id}))
+            publish_event(job_id, sse_event("log", {"step": f"phase_{step_count[0]}", "message": f"Phase: {msg}"}))
+            return
         publish_event(job_id, sse_event("log", {"step": f"{step_type}_{step_count[0]}", "message": msg}))
 
         # Send pixel snapshots on tool_result (AFTER execution, canvas is updated)
@@ -103,7 +108,9 @@ def handle_generate(job: dict):
             }))
 
     try:
-        canvas = agent_run(
+        from agent import run_phased_generation
+        _run = run_phased_generation if (workflow == "phased" and not is_continuation) else agent_run
+        canvas = _run(
             gen_id=gen_id,
             message=message,
             palette=colors,

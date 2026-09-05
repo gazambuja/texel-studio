@@ -20,6 +20,9 @@ export function ControlPanel({ studio }: { studio: any }) {
   const modeRef = useRef<HTMLSelectElement>(null);
   const refineRef = useRef<HTMLInputElement>(null);
   const seedModeRef = useRef<HTMLSelectElement>(null);
+  const workflowRef = useRef<HTMLSelectElement>(null);
+
+  const PHASES = ["silhouette", "base_colors", "shading", "detail", "cleanup"];
 
   const handleGenerate = async () => {
     const prompt = promptRef.current?.value?.trim();
@@ -33,6 +36,7 @@ export function ControlPanel({ studio }: { studio: any }) {
       mode: modeRef.current?.value || "auto",
       refine: refineRef.current?.checked || false,
       seedMode: seedModeRef.current?.value || "soft",
+      workflow: workflowRef.current?.value || undefined,
     });
   };
 
@@ -296,7 +300,35 @@ export function ControlPanel({ studio }: { studio: any }) {
             <option value="locked">seed: locked</option>
             <option value="off">seed: off</option>
           </select>
+          <select ref={workflowRef} defaultValue="" className="flex-1" title="Agent mode: phased runs silhouette→colors→shading→detail→cleanup with a silhouette gate">
+            <option value="">workflow: auto</option>
+            <option value="phased">phased</option>
+            <option value="freeform">freeform</option>
+          </select>
         </div>
+
+        {/* Phase tracker (spec 0005) */}
+        {studio.currentPhase && (
+          <div className="flex gap-1 mb-1.5" style={{ fontSize: "9px" }}>
+            {PHASES.map((p) => {
+              const active = studio.currentPhase?.startsWith(p);
+              const done = PHASES.indexOf(p) < PHASES.findIndex((q) => studio.currentPhase?.startsWith(q));
+              return (
+                <span
+                  key={p}
+                  style={{
+                    flex: 1, textAlign: "center", padding: "2px 0",
+                    border: "1px solid var(--border)",
+                    background: active ? "var(--accent)" : "transparent",
+                    color: active ? "#000" : done ? "var(--text-dim)" : "var(--text-faint)",
+                  }}
+                >
+                  {p.replace("_", " ")}
+                </span>
+              );
+            })}
+          </div>
+        )}
         <div className="flex gap-1">
           <button
             className="btn btn-primary flex-1"

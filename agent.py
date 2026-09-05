@@ -486,8 +486,40 @@ def _make_context_hook(subject: str):
     return hook
 
 
+# spec 0005 — which tools each phase may use. view_canvas / view_reference /
+# get_pixel are always allowed; anything not listed for a phase is dropped.
+_PHASE_TOOLS = {
+    "silhouette": {"fill_rect", "fill_row", "fill_column", "draw_line", "draw_circle",
+                   "draw_ellipse", "draw_triangle", "draw_rotated_rect"},
+    "base_colors": {"fill_rect", "fill_row", "fill_column", "draw_line", "draw_circle",
+                    "draw_ellipse", "draw_triangle", "draw_rotated_rect",
+                    "draw_pixel", "draw_pixels", "noise_fill_rect", "noise_fill_circle",
+                    "voronoi_fill"},
+    "shading": None,   # all except finish
+    "detail": "ALL",
+    "cleanup": "ALL",
+}
+_ALWAYS_TOOLS = {"view_canvas", "view_reference", "get_pixel"}
+
+
+def _filter_phase_tools(tools: list, phase: str | None) -> list:
+    if not phase or phase not in _PHASE_TOOLS:
+        return tools
+    allow = _PHASE_TOOLS[phase]
+    out = []
+    for t in tools:
+        if t.name in _ALWAYS_TOOLS:
+            out.append(t)
+        elif t.name == "finish":
+            if allow == "ALL":
+                out.append(t)
+        elif allow == "ALL" or allow is None or t.name in allow:
+            out.append(t)
+    return out
+
+
 def make_tools(canvas: Canvas, vision: bool = True, full_toolset: bool = True,
-               reference_img=None, tool_images: bool = True):
+               reference_img=None, tool_images: bool = True, phase: str | None = None):
     """Create agent tools.
 
     vision=False -> ASCII-only view_canvas.
@@ -607,7 +639,7 @@ def make_tools(canvas: Canvas, vision: bool = True, full_toolset: bool = True,
         core.append(view_reference)
 
     if not full_toolset:
-        return core
+        return _filter_phase_tools(core, phase)
 
     # Advanced tools — only for capable models
 
@@ -641,7 +673,10 @@ def make_tools(canvas: Canvas, vision: bool = True, full_toolset: bool = True,
         count = canvas.fill_voronoi(x1, y1, x2, y2, colors, num_cells, seed)
         return f"Voronoi-filled rect ({x1},{y1})-({x2},{y2}) with {num_cells} cells, {count}px"
 
-    return core + [draw_ellipse, draw_triangle, draw_rotated_rect, noise_fill_circle, voronoi_fill]
+    return _filter_phase_tools(
+        core + [draw_ellipse, draw_triangle, draw_rotated_rect, noise_fill_circle, voronoi_fill],
+        phase,
+    )
 
 
 # ── LLM factory ──
@@ -842,6 +877,7 @@ def run_agent_stream(
     existing_pixels: list[list[int]] | None = None,
     cancel_check: Any = None,
     seed_mode: str = "off",
+    phase: str | None = None,
 ):
     """
     Run the agent or continue an existing session.
@@ -896,7 +932,7 @@ def run_agent_stream(
     # so those get the improved text summary.
     tool_images = vision and _supports_tool_images(model_name)
     tools = make_tools(canvas, vision=vision, full_toolset=full_toolset,
-                       reference_img=reference_img, tool_images=tool_images)
+                       reference_img=reference_img, tool_images=tool_images, phase=phase)
     llm = _get_llm(model_name)
     checkpointer = get_checkpointer()
     # spec 0004 — keep the target in view (periodic re-anchor) and cap how many
@@ -1012,5 +1048,110 @@ Use the canvas tools to make the requested changes. Call finish when done."""
 
                 if step_count >= max_steps:
                     finished = True
+
+    return canvas
+
+
+# ── spec 0005 — silhouette-first phased workflow ──
+
+# (name, budget weight of the global step cap, instruction). Weights sum to 1.0.
+AGENT_PHASES = [
+    ("silhouette", 0.22, """PHASE 1 — SILHOUETTE.
+Block out ONLY the overall shape: which pixels are the subject (opaque) and which
+stay background (-1). Use fill_rect / fill_row / fill_column / draw_circle /
+draw_ellipse — coarse shapes only, NO single pixels. Match the reference outline.
+When the silhouette reads clearly, STOP: reply with one short sentence and make no
+more tool calls."""),
+    ("base_colors", 0.22, """PHASE 2 — BASE COLORS.
+Flat-fill each region of the shape with its correct palette colour from the
+reference. No shading, no outline yet. When every area has its base colour, STOP."""),
+    ("shading", 0.20, """PHASE 3 — SHADING.
+Add 1-2 tone steps: lighter where light hits, darker on the underside / in shadow,
+following the reference. Keep it readable — do not over-dither. When shading reads,
+STOP."""),
+    ("detail", 0.24, """PHASE 4 — DETAIL.
+Tidy the edges and add the small features that make the subject recognizable at 1x
+(eyes, highlights, texture accents). Call finish() when it looks done."""),
+    ("cleanup", 0.12, """PHASE 5 — CLEANUP.
+Remove stray pixels and fix broken edges. Block tile: check it will tile
+seamlessly. Icon / character: check the transparent padding. Call finish()."""),
+]
+
+SILHOUETTE_IOU_SEEDED = float(os.getenv("SILHOUETTE_IOU_SEEDED", "0.85"))
+SILHOUETTE_IOU_BLANK = float(os.getenv("SILHOUETTE_IOU_BLANK", "0.70"))
+SILHOUETTE_RETRIES = int(os.getenv("SILHOUETTE_RETRIES", "2"))
+
+
+def run_phased_generation(
+    gen_id,
+    message: str,
+    palette: list[str],
+    size: int,
+    model_name: str,
+    style_prompt: str = "",
+    sprite_type: str = "block",
+    reference_b64: str | None = None,
+    on_step: Any = None,
+    max_steps: int = 80,
+    existing_pixels: list[list[int]] | None = None,
+    cancel_check: Any = None,
+    seed_mode: str = "off",
+):
+    """Drive generation through the fixed phases (spec 0005), one agent call per
+    phase on the same LangGraph thread. After the silhouette phase, gate on IoU
+    vs the reference-derived mask and re-run that phase up to SILHOUETTE_RETRIES
+    times before moving on."""
+    from jobs._render_core import iou, silhouette_of
+
+    ref_mask = None
+    if reference_b64:
+        try:
+            from jobs._seed import build_seed_from_b64
+            _, ref_mask = build_seed_from_b64(reference_b64, size, sprite_type, palette)
+        except Exception:
+            ref_mask = None
+
+    seeded = _has_content(existing_pixels) or (seed_mode in ("soft", "locked") and reference_b64)
+    gate = SILHOUETTE_IOU_SEEDED if seeded else SILHOUETTE_IOU_BLANK
+
+    pixels = existing_pixels
+    canvas = Canvas(size, palette, pixels)
+
+    def _emit_phase(name: str):
+        if on_step:
+            on_step(canvas, "phase", name)
+
+    for pname, weight, instr in AGENT_PHASES:
+        if cancel_check and cancel_check():
+            break
+        budget = max(6, round(max_steps * weight))
+        _emit_phase(pname)
+
+        canvas = run_agent_stream(
+            gen_id=gen_id, message=f"{message}\n\n{instr}", palette=palette, size=size,
+            model_name=model_name, style_prompt=style_prompt, sprite_type=sprite_type,
+            reference_b64=reference_b64, on_step=on_step, max_steps=budget,
+            existing_pixels=pixels, cancel_check=cancel_check,
+            seed_mode=(seed_mode if pixels is None else "off"), phase=pname,
+        )
+        pixels = [row[:] for row in canvas.pixels]
+
+        if pname == "silhouette" and ref_mask:
+            for attempt in range(1, SILHOUETTE_RETRIES + 1):
+                score = iou(silhouette_of(pixels), ref_mask)
+                if score >= gate:
+                    break
+                _emit_phase(f"silhouette-retry-{attempt} (IoU {score:.2f})")
+                canvas = run_agent_stream(
+                    gen_id=gen_id, size=size, palette=palette, model_name=model_name,
+                    style_prompt=style_prompt, sprite_type=sprite_type,
+                    reference_b64=reference_b64, on_step=on_step, max_steps=budget,
+                    existing_pixels=pixels, cancel_check=cancel_check, seed_mode="off",
+                    phase="silhouette",
+                    message=(f"{message}\n\nThe silhouette only overlaps the reference "
+                             f"{score:.0%}. Fix the OUTLINE: add the missing parts, remove "
+                             "the extra parts, coarse shapes only. STOP when it matches."),
+                )
+                pixels = [row[:] for row in canvas.pixels]
 
     return canvas
