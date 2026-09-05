@@ -18,6 +18,13 @@ class SpriteGenerateParams(BaseModel):
     sprite_type: str = "block"
     system_prompt: Optional[str] = None
     reference_id: Optional[str] = None
+    # spec 0007 — completion score gate (headless: auto-continue on low score)
+    score: bool = True
+    score_threshold: Optional[int] = None
+    score_model: Optional[str] = None
+    on_low_score: Optional[str] = None
+    extra_steps: Optional[int] = None
+    max_score_rounds: Optional[int] = None
 
 
 @register_job("sprite.generate")
@@ -59,39 +66,62 @@ class SpriteGenerateHandler(JobHandler):
                 ))
 
         def worker():
-            canvas = run_agent_stream(
-                gen_id=external_id,
-                message=params.prompt,
-                palette=params.colors,
-                size=size,
-                model_name=model,
-                style_prompt=system_prompt,
-                sprite_type=params.sprite_type,
-                reference_b64=ref_b64,
-                on_step=on_step,
-                cancel_check=ctx.cancel_check,
-            )
+            import scoring
 
-            final_pixels = [row[:] for row in canvas.pixels]
-            bridge.emit(progress(
-                pixel_data=final_pixels,
-                iteration=step_count[0],
-                notes="Agent finished",
-            ))
-
-            final_img = canvas.to_image()
+            # Headless: default to auto-continue (no user to ask).
+            cfg = scoring.ScoreConfig.from_request(params, interactive=False)
             filename = f"gen_{external_id}_{size}x{size}.png"
-            storage.save_image(final_img, f"output/{filename}")
-            storage.save_image(upscale_image(final_img, 512), f"output/gen_{external_id}_preview.png")
+            msg = params.prompt
+            existing = None
+            rounds = 0
+            decision = None
+
+            while True:
+                canvas = run_agent_stream(
+                    gen_id=external_id,
+                    message=msg,
+                    palette=params.colors,
+                    size=size,
+                    model_name=model,
+                    style_prompt=system_prompt,
+                    sprite_type=params.sprite_type,
+                    reference_b64=ref_b64,
+                    on_step=on_step,
+                    existing_pixels=existing,
+                    cancel_check=ctx.cancel_check,
+                    **({"max_steps": cfg.extra_steps} if rounds else {}),
+                )
+
+                final_pixels = [row[:] for row in canvas.pixels]
+                existing = final_pixels
+                bridge.emit(progress(pixel_data=final_pixels, iteration=step_count[0], notes="Agent finished"))
+
+                final_img = canvas.to_image()
+                storage.save_image(final_img, f"output/{filename}")
+                storage.save_image(upscale_image(final_img, 512), f"output/gen_{external_id}_preview.png")
+
+                decision = None
+                if cfg.enabled:
+                    bridge.emit(log("Scoring result against the prompt...", step="scoring"))
+                    decision = scoring.run_gate(
+                        goal=params.prompt, sprite_type=params.sprite_type, final_img=final_img,
+                        gen_model=model, cfg=cfg, reference_b64=ref_b64, rounds_done=rounds,
+                    )
+                if decision is not None and decision.action == "continue":
+                    rounds += 1
+                    msg = scoring.gaps_to_instruction(decision.gaps)
+                    bridge.emit(log(f"Score {decision.score} < {cfg.threshold} — +{cfg.extra_steps} steps", step="continue"))
+                    continue
+                break
 
             bridge.emit(log(f"Done in {step_count[0]} steps", step="complete"))
-            bridge.emit(result(
-                id=external_id,
-                image_path=filename,
-                iterations=step_count[0],
-                pixel_data=final_pixels,
-                status="completed",
-            ))
+            res: dict = dict(
+                id=external_id, image_path=filename, iterations=step_count[0],
+                pixel_data=final_pixels, status="completed",
+            )
+            if decision is not None:
+                res.update(score=decision.score, score_reason=decision.reason, gaps=decision.gaps)
+            bridge.emit(result(**res))
 
         run_in_thread(worker, bridge)
         yield from bridge.iter_events()

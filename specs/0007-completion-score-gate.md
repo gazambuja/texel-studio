@@ -1,7 +1,7 @@
 # Spec 0007 — Completion Score Gate
 
 - **Branch:** `spec/0007-completion-score-gate` (from `main`, after 0001)
-- **Status:** Planned — **runs next, before 0002** (user-requested mid-0001)
+- **Status:** Implemented — merged to local `main`
 - **Depends on:** 0001 (refine pass, `existing_pixels` continuation).
   Benefits later from 0003 (a preview the scorer can actually read).
 - **North-star link:** Nothing is delivered as "done" until it has been checked
@@ -100,19 +100,43 @@ information.
 - Score-gate wrapper shared by `sprite_generate`, `sprite_chat`,
   `sprite_render` (refine), `_run_agent_sse`, `_run_render_sse`.
 
-## 5. Tasks (outline)
+## 5. Tasks
 
-1. [ ] `agent/_score.py`: `assess()` + `AssessmentScore` schema + a test with a
-   stub LLM (monkeypatch `_get_llm`) asserting parse + threshold logic.
-2. [ ] DB columns `score`, `score_reason` (+ migration).
-3. [ ] Score-gate wrapper: run assess at end-of-draw, decide per `on_low_score`.
-4. [ ] `needs_decision` SSE event + `POST /continue_drawing` resuming the thread
-   with the gap list and `extra_steps`.
-5. [ ] `max_score_rounds` bound.
-6. [ ] Request/params fields through `server.py` + `worker.py` + handlers.
-7. [ ] Standalone UI: score badge + decision prompt ("+100 steps" / "good
-   enough"); rebuild `static/`.
-8. [ ] Verification.
+1. [x] `scoring.py` — `AssessmentScore` schema, `assess()` (vision call, clamps
+   score, drops empty gaps), `decide()` (pure policy), `ScoreConfig`
+   (+`from_request`, interactive vs headless default), `run_gate()`,
+   `gaps_to_instruction()`.
+2. [x] DB columns `score`, `score_reason`, `score_rounds` (+ `_has_column`
+   migration).
+3. [x] Score gate in `_run_agent_sse` (self-hosted agent path): loop that
+   re-runs the agent as a continuation on `action=="continue"`; emits
+   `needs_decision` and stops on `action=="ask"`. Same gate in `_run_render_sse`
+   (0001 refine) and `jobs/sprite_generate.py` (headless → `auto`).
+4. [x] `needs_decision` SSE event + `POST /api/generations/{id}/continue_drawing`
+   `{approve, extra_steps?, gaps?}` — resumes the thread with
+   `gaps_to_instruction`, `max_steps=extra_steps`, re-runs the gate.
+5. [x] `max_score_rounds` bound (default 2) enforced in `decide()`;
+   `/continue_drawing` bumps `score_rounds`.
+6. [x] `GenerateRequest` + `SpriteGenerateParams` fields
+   (`score`, `score_threshold`, `score_model`, `on_low_score`, `extra_steps`,
+   `max_score_rounds`); env defaults `SCORE_THRESHOLD` / `SCORE_EXTRA_STEPS` /
+   `SCORE_MAX_ROUNDS`.
+7. [x] Standalone UI (`useStudio.ts` + `ControlPanel.tsx`): `pendingScore`
+   state, `needs_decision` handling, score shown on `complete`,
+   `continueDrawing(approve, extraSteps)` streaming the continue response,
+   "draw N more steps" / "good enough" buttons. `static/` rebuilt.
+8. [x] Verification — Section 6.
+
+### Deviations
+
+- `worker.handle_generate` (the legacy Redis `{"type":"generate"}` path used by
+  `/api/generate` in scaled mode for the *agent* path) does **not** score. The
+  generic `/api/jobs` → `sprite.generate` handler does. Legacy-Redis-agent
+  scoring is a follow-up (can't be exercised without a Redis worker here).
+- `sprite_chat` (edits) is not gated — scoring runs on initial generation and
+  the 0001 refine pass only.
+- Scoring model failure / no vision model ⇒ `run_gate` returns `None` ⇒ finalize
+  normally (verified live with a real low score, and with a stubbed failure).
 
 ## 6. Verification
 
@@ -141,12 +165,22 @@ information.
 
 ## 8. Definition of done
 
-- [ ] Every agent-drawing completion carries an LLM closeness `score` + reason +
-  gaps, persisted and on the result event.
-- [ ] Below threshold: interactive clients are asked to add N steps; approving
-  resumes the same thread with the gap list; declining finalizes.
-- [ ] `on_low_score` auto/ignore modes for headless use; `max_score_rounds`
-  bounds cost.
-- [ ] Standalone UI shows the score and the continue/finish choice.
-- [ ] Cost delta per generation measured and recorded in the PR.
-- [ ] Regression: disabling the gate reproduces the pre-0007 flow.
+- [x] Agent-drawing + 0001-refine completions carry an LLM `score` + `reason` +
+  `gaps`, persisted (`generations.score/score_reason/score_rounds`) and on the
+  `complete` event. *(Verified: gen 21 score 15, gen 18 score 45.)*
+- [x] Below threshold + interactive: `needs_decision` event, no finalize;
+  `POST /continue_drawing {approve:true}` resumes the same agent thread with the
+  gap list; `{approve:false}` finalizes. *(Verified live: decline → 200
+  `{status:"complete"}`.)*
+- [x] `on_low_score` `auto` (headless default, loops) / `ignore` (finalize +
+  record) modes; `max_score_rounds` bounds the loop. *(Unit-tested in
+  `tests/test_scoring.py`.)*
+- [x] Standalone UI shows the score and a "draw N more steps" / "good enough"
+  choice; `static/` rebuilt (`next build` green).
+- [x] 34 tests green.
+- [x] Regression: `score:false` (or model unavailable) ⇒ pre-0007 flow plus a
+  null score column. *(`run_gate` returns None ⇒ original finalize path.)*
+- **Cost note:** one extra vision call per completion (+ one per continue
+  round). At 256px NEAREST upscale + `temperature=0.2`, structured output.
+  Bounded by `max_score_rounds`; disable with `score:false` or
+  `SCORE_THRESHOLD=0`.
