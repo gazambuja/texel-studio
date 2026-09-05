@@ -21,6 +21,9 @@ export function useStudio() {
   const [status, setStatus] = useState<{ type: "idle" | "generating" | "complete" | "error"; message: string }>({ type: "idle", message: "" });
   const [activeGenId, setActiveGenId] = useState<number | null>(null);
   const [currentGen, setCurrentGen] = useState<Generation | null>(null);
+  const [pendingScore, setPendingScore] = useState<
+    { id: number; score: number; reason: string; gaps: string[]; extra_steps: number } | null
+  >(null);
 
   // History
   const [generations, setGenerations] = useState<Generation[]>([]);
@@ -223,9 +226,26 @@ export function useStudio() {
         if (data.gen_id) setActiveGenId(data.gen_id);
         break;
       case "complete":
-        setStatus({ type: "complete", message: "Complete! Use chat to request edits." });
+        setStatus({
+          type: "complete",
+          message: data.score != null
+            ? `Complete — score ${data.score}/100. Use chat to request edits.`
+            : "Complete! Use chat to request edits.",
+        });
+        setPendingScore(null);
         setCurrentGen({ id: data.id, image_path: data.image_path } as Generation);
         setActiveGenId(data.id);
+        break;
+      case "needs_decision":
+        setActiveGenId(data.id);
+        setPendingScore({
+          id: data.id,
+          score: data.score,
+          reason: data.reason || "",
+          gaps: data.gaps || [],
+          extra_steps: data.extra_steps || 100,
+        });
+        setStatus({ type: "complete", message: `Score ${data.score}/100 — ${data.reason || "below target"}` });
         break;
       case "error":
         setStatus({ type: "error", message: data.message });
@@ -233,6 +253,61 @@ export function useStudio() {
         break;
     }
   }, []);
+
+  const streamSSE = useCallback(async (res: Response) => {
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop()!;
+      let eventType = "";
+      let eventData = "";
+      for (const line of lines) {
+        if (line.startsWith("event: ")) eventType = line.slice(7);
+        else if (line.startsWith("data: ")) eventData = line.slice(6);
+        else if (line === "" && eventType && eventData) {
+          handleSSE(eventType, JSON.parse(eventData));
+          eventType = "";
+          eventData = "";
+        }
+      }
+    }
+  }, [handleSSE]);
+
+  // ── Score gate decision (spec 0007) ──
+  const continueDrawing = useCallback(async (approve: boolean, extraSteps?: number) => {
+    if (!pendingScore) return;
+    const { id, gaps } = pendingScore;
+    setPendingScore(null);
+    if (!approve) {
+      await fetch(`http://localhost:8500/api/generations/${id}/continue_drawing`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approve: false }),
+      });
+      setStatus({ type: "complete", message: "Kept as-is." });
+      await loadHistory();
+      return;
+    }
+    setIsGenerating(true);
+    setStatus({ type: "generating", message: "Drawing more steps..." });
+    try {
+      const res = await fetch(`http://localhost:8500/api/generations/${id}/continue_drawing`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approve: true, extra_steps: extraSteps, gaps }),
+      });
+      await streamSSE(res);
+      await loadHistory();
+    } catch (e: any) {
+      setStatus({ type: "error", message: e.message });
+    }
+    setIsGenerating(false);
+  }, [pendingScore, streamSSE, loadHistory]);
 
   // ── Chat ──
   const sendChat = useCallback(async (message: string) => {
@@ -328,13 +403,14 @@ export function useStudio() {
     pixelData, spriteSize, isGenerating, logs, status,
     activeGenId, currentGen, generations,
     referenceId, refConfirmed,
+    pendingScore,
 
     // Actions
     loadSettings, loadPalettes, loadHistory,
     selectPalette, setSelectedColorIdx, addColor, savePaletteAs,
     generateReference, reviseReference, uploadReference, confirmReference, clearReference,
     extractReferencePalette,
-    generate, sendChat, skipAndFinalize,
+    generate, sendChat, skipAndFinalize, continueDrawing,
     loadGeneration, deleteGeneration,
     setPixel, setSpriteSize, setPixelData,
   };

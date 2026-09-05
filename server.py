@@ -187,6 +187,12 @@ def init_db():
         conn.execute("ALTER TABLE generations ADD COLUMN sprite_type TEXT DEFAULT 'block'")
     if not _has_column(conn, "generations", "reference_id"):
         conn.execute("ALTER TABLE generations ADD COLUMN reference_id TEXT")
+    if not _has_column(conn, "generations", "score"):
+        conn.execute("ALTER TABLE generations ADD COLUMN score INTEGER")
+    if not _has_column(conn, "generations", "score_reason"):
+        conn.execute("ALTER TABLE generations ADD COLUMN score_reason TEXT")
+    if not _has_column(conn, "generations", "score_rounds"):
+        conn.execute("ALTER TABLE generations ADD COLUMN score_rounds INTEGER DEFAULT 0")
 
     # Insert default palette if none exist
     if conn.execute("SELECT COUNT(*) FROM palettes").fetchone()[0] == 0:
@@ -540,11 +546,19 @@ def _wait_for_result(sub):
         sub.close()
     return {"error": "Timed out"}
 
-def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = False, colors: list[str] | None = None):
-    """Shared SSE generator for initial generation and chat continuation."""
+def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = False,
+                   colors: list[str] | None = None, score_cfg=None, max_steps: int | None = None):
+    """Shared SSE generator for initial generation and chat continuation.
+
+    `score_cfg` (a scoring.ScoreConfig) enables the completion score gate: when
+    set, the finished sprite is scored against the prompt before we report
+    `complete`. On a low score we either loop more steps (`on_low_score="auto"`)
+    or emit `needs_decision` and stop without finalizing (`"ask"`).
+    """
     import threading
     import queue as queue_mod
     from agent import run_agent_stream as agent_run, cleanup_session
+    import scoring
 
     db = get_db()
     gen = db.execute("SELECT * FROM generations WHERE id = ?", (generation_id,)).fetchone()
@@ -597,42 +611,90 @@ def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = Fal
 
     def worker():
         try:
-            canvas = agent_run(
-                gen_id=generation_id,
-                message=message,
-                palette=palette,
-                size=size,
-                model_name=model,
-                style_prompt=system_prompt,
-                sprite_type=sprite_type,
-                reference_b64=ref_b64,
-                on_step=on_step,
-                existing_pixels=existing_pixels,
-            )
-
-            pixel_data = [row[:] for row in canvas.pixels]
-            event_queue.put(sse_event("pixels", {
-                "pixel_data": pixel_data, "iteration": step_count[0],
-                "notes": "Agent finished", "gen_id": generation_id,
-            }))
-
-            db2 = get_db()
-            db2.execute("UPDATE generations SET pixel_data = ?, iterations = ? WHERE id = ?",
-                       (json.dumps(pixel_data), step_count[0], generation_id))
-
             import storage as _storage
-            final_img = canvas.to_image()
+            db2 = get_db()
+            rounds_done = int((gen["score_rounds"] if "score_rounds" in gen.keys() else 0) or 0)
+            current_pixels = existing_pixels
+            cur_msg = message
             filename = f"gen_{generation_id}_{size}x{size}.png"
-            _storage.save_image(final_img, f"output/{filename}")
-            _storage.save_image(upscale_image(final_img, 512), f"output/gen_{generation_id}_preview.png")
 
-            db2.execute("UPDATE generations SET status = 'complete', image_path = ? WHERE id = ?",
-                       (filename, generation_id))
-            db2.commit()
-            db2.close()
+            while True:
+                agent_kwargs = dict(
+                    gen_id=generation_id,
+                    message=cur_msg,
+                    palette=palette,
+                    size=size,
+                    model_name=model,
+                    style_prompt=system_prompt,
+                    sprite_type=sprite_type,
+                    reference_b64=ref_b64,
+                    on_step=on_step,
+                    existing_pixels=current_pixels,
+                )
+                if max_steps is not None:
+                    agent_kwargs["max_steps"] = max_steps
+                canvas = agent_run(**agent_kwargs)
 
-            event_queue.put(sse_event("log", {"step": "complete", "message": f"Done in {step_count[0]} steps"}))
-            event_queue.put(sse_event("complete", {"id": generation_id, "image_path": filename}))
+                pixel_data = [row[:] for row in canvas.pixels]
+                current_pixels = pixel_data
+                event_queue.put(sse_event("pixels", {
+                    "pixel_data": pixel_data, "iteration": step_count[0],
+                    "notes": "Agent finished", "gen_id": generation_id,
+                }))
+
+                final_img = canvas.to_image()
+                _storage.save_image(final_img, f"output/{filename}")
+                _storage.save_image(upscale_image(final_img, 512), f"output/gen_{generation_id}_preview.png")
+                db2.execute("UPDATE generations SET pixel_data = ?, iterations = ?, image_path = ? WHERE id = ?",
+                           (json.dumps(pixel_data), step_count[0], filename, generation_id))
+                db2.commit()
+
+                decision = None
+                if score_cfg is not None:
+                    event_queue.put(sse_event("log", {"step": "scoring", "message": "Scoring result against the prompt..."}))
+                    decision = scoring.run_gate(
+                        goal=gen["prompt"], sprite_type=sprite_type, final_img=final_img,
+                        gen_model=model, cfg=score_cfg, reference_b64=ref_b64,
+                        rounds_done=rounds_done,
+                    )
+
+                if decision is not None:
+                    db2.execute(
+                        "UPDATE generations SET score = ?, score_reason = ?, score_rounds = ? WHERE id = ?",
+                        (decision.score, decision.reason, rounds_done, generation_id),
+                    )
+                    db2.commit()
+
+                if decision is not None and decision.action == "continue":
+                    rounds_done += 1
+                    cur_msg = scoring.gaps_to_instruction(decision.gaps)
+                    event_queue.put(sse_event("log", {"step": "continue", "message":
+                        f"Score {decision.score} < {score_cfg.threshold} — drawing {score_cfg.extra_steps} more steps"}))
+                    # next agent_run resumes the same thread as a continuation
+                    continue
+
+                if decision is not None and decision.action == "ask":
+                    db2.execute("UPDATE generations SET status = 'needs_review' WHERE id = ?", (generation_id,))
+                    db2.commit()
+                    db2.close()
+                    event_queue.put(sse_event("needs_decision", {
+                        "id": generation_id, "image_path": filename,
+                        "score": decision.score, "reason": decision.reason,
+                        "gaps": decision.gaps, "extra_steps": decision.extra_steps,
+                        "round": rounds_done,
+                    }))
+                    return
+
+                db2.execute("UPDATE generations SET status = 'complete', image_path = ? WHERE id = ?",
+                           (filename, generation_id))
+                db2.commit()
+                db2.close()
+                event_queue.put(sse_event("log", {"step": "complete", "message": f"Done in {step_count[0]} steps"}))
+                done = {"id": generation_id, "image_path": filename}
+                if decision is not None:
+                    done.update(score=decision.score, reason=decision.reason, gaps=decision.gaps)
+                event_queue.put(sse_event("complete", done))
+                return
 
         except Exception as e:
             db2 = get_db()
@@ -724,10 +786,31 @@ def _run_render_sse(generation_id: int, data: "GenerateRequest"):
         return
 
     colors = final.get("colors") or data.colors
+
+    # spec 0007 — score the finished sprite. With a refine pass there is an agent
+    # thread we can resume; without one we still surface the score as info.
+    import scoring
+    decision = None
+    score_cfg = scoring.ScoreConfig.from_request(data, interactive=True)
+    if score_cfg.enabled:
+        yield sse_event("log", {"step": "scoring", "message": "Scoring result against the prompt..."})
+        ref_b64 = load_reference_b64(data.reference_id)
+        decision = scoring.run_gate(
+            goal=data.prompt or "", sprite_type=data.sprite_type,
+            final_img=pixels_to_image(final["pixel_data"], colors, data.size),
+            gen_model=data.model or DEFAULT_MODEL, cfg=score_cfg, reference_b64=ref_b64,
+        )
+
+    status = "complete"
+    if decision is not None and decision.action == "ask" and data.refine:
+        status = "needs_review"
+
     db.execute(
-        "UPDATE generations SET pixel_data = ?, colors = ?, iterations = ?, status = 'complete', image_path = ? WHERE id = ?",
+        "UPDATE generations SET pixel_data = ?, colors = ?, iterations = ?, status = ?, image_path = ?, score = ?, score_reason = ? WHERE id = ?",
         (json.dumps(final["pixel_data"]), json.dumps(colors), final.get("iterations", 1),
-         final["image_path"], generation_id),
+         status, final["image_path"],
+         (decision.score if decision else None), (decision.reason if decision else None),
+         generation_id),
     )
     db.commit()
     db.close()
@@ -735,7 +818,17 @@ def _run_render_sse(generation_id: int, data: "GenerateRequest"):
         "pixel_data": final["pixel_data"], "iteration": final.get("iterations", 1),
         "notes": "Render finished", "gen_id": generation_id,
     })
-    yield sse_event("complete", {"id": generation_id, "image_path": final["image_path"], "colors": colors})
+    if status == "needs_review":
+        yield sse_event("needs_decision", {
+            "id": generation_id, "image_path": final["image_path"],
+            "score": decision.score, "reason": decision.reason, "gaps": decision.gaps,
+            "extra_steps": decision.extra_steps, "round": 0,
+        })
+        return
+    done = {"id": generation_id, "image_path": final["image_path"], "colors": colors}
+    if decision is not None:
+        done.update(score=decision.score, reason=decision.reason, gaps=decision.gaps)
+    yield sse_event("complete", done)
 
 # ── FastAPI ──
 
@@ -803,6 +896,13 @@ class GenerateRequest(BaseModel):
     mode: str = "auto"            # "auto" | "image-first" | "agent"
     refine: bool = False          # run a short LLM cleanup pass after image-first
     auto_reference: bool = True   # generate a concept image when none was supplied
+    # spec 0007 — completion score gate
+    score: bool = True            # score the finished sprite against the prompt
+    score_threshold: Optional[int] = None
+    score_model: Optional[str] = None
+    on_low_score: Optional[str] = None   # "ask" | "auto" | "ignore"
+    extra_steps: Optional[int] = None
+    max_score_rounds: Optional[int] = None
 
 
 def _use_image_first(data: "GenerateRequest") -> bool:
@@ -1107,7 +1207,12 @@ async def start_generation(data: GenerateRequest):
         )
 
     # Fallback: in-memory (no Redis, self-hosted)
-    generator = _run_render_sse(gen_id, data) if image_first else _run_agent_sse(gen_id, data.prompt, colors=data.colors)
+    import scoring
+    score_cfg = scoring.ScoreConfig.from_request(data, interactive=True)
+    if image_first:
+        generator = _run_render_sse(gen_id, data)
+    else:
+        generator = _run_agent_sse(gen_id, data.prompt, colors=data.colors, score_cfg=score_cfg)
     return StreamingResponse(
         generator,
         media_type="text/event-stream",
@@ -1235,6 +1340,49 @@ def finalize_generation(gen_id: int):
     db.commit()
     db.close()
     return {"ok": True, "id": gen_id, "image_path": filename}
+
+
+class ContinueDrawingRequest(BaseModel):
+    approve: bool
+    extra_steps: Optional[int] = None
+    gaps: list[str] = []
+
+
+@app.post("/api/generations/{gen_id}/continue_drawing")
+async def continue_drawing(gen_id: int, data: ContinueDrawingRequest):
+    """Respond to a `needs_decision` (spec 0007). approve=false finalizes the
+    current pixels; approve=true resumes the agent thread for `extra_steps` more
+    steps targeting the reported gaps, then re-runs the score gate."""
+    import scoring
+    db = get_db()
+    gen = db.execute("SELECT * FROM generations WHERE id = ?", (gen_id,)).fetchone()
+    if not gen or not gen["pixel_data"]:
+        raise HTTPException(404)
+
+    if not data.approve:
+        db.execute("UPDATE generations SET status = 'complete' WHERE id = ?", (gen_id,))
+        db.execute("INSERT INTO generation_logs (generation_id, step, message) VALUES (?, ?, ?)",
+                   (gen_id, "score_declined", f"User kept score {gen['score']} result as-is"))
+        db.commit()
+        db.close()
+        return {"ok": True, "status": "complete"}
+
+    extra = int(data.extra_steps or scoring.DEFAULT_EXTRA_STEPS)
+    rounds = int((gen["score_rounds"] or 0)) + 1
+    db.execute("UPDATE generations SET score_rounds = ?, status = 'generating' WHERE id = ?",
+               (rounds, gen_id))
+    db.execute("INSERT INTO generation_logs (generation_id, step, message) VALUES (?, ?, ?)",
+               (gen_id, "score_continue", f"Round {rounds}: +{extra} steps"))
+    db.commit()
+    db.close()
+
+    cfg = scoring.ScoreConfig(on_low_score="ask", extra_steps=extra)
+    msg = scoring.gaps_to_instruction(data.gaps)
+    return StreamingResponse(
+        _run_agent_sse(gen_id, msg, is_continuation=True, score_cfg=cfg, max_steps=extra),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 # ── Tileset generation ──
 

@@ -310,6 +310,41 @@ export function ControlPanel({ studio }: { studio: any }) {
           )}
         </div>
 
+        {/* Score gate decision (spec 0007) */}
+        <AnimatePresence>
+          {studio.pendingScore && (
+            <motion.div
+              initial={{ opacity: 0, y: 4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              className="mt-2 p-2"
+              style={{ border: "1px solid var(--border)", fontSize: "10px", lineHeight: 1.4 }}
+            >
+              <div style={{ color: "var(--danger)" }}>
+                score {studio.pendingScore.score}/100 — {studio.pendingScore.reason}
+              </div>
+              {studio.pendingScore.gaps?.length > 0 && (
+                <ul style={{ margin: "4px 0 6px", paddingLeft: 14, color: "var(--text-dim)" }}>
+                  {studio.pendingScore.gaps.map((g: string, i: number) => (
+                    <li key={i}>{g}</li>
+                  ))}
+                </ul>
+              )}
+              <div className="flex gap-1">
+                <button
+                  className="btn btn-primary flex-1"
+                  onClick={() => studio.continueDrawing(true, studio.pendingScore.extra_steps)}
+                >
+                  draw {studio.pendingScore.extra_steps} more steps
+                </button>
+                <button className="btn flex-1" onClick={() => studio.continueDrawing(false)}>
+                  good enough
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* Status */}
         <AnimatePresence>
           {studio.status.message && (
