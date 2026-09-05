@@ -92,10 +92,16 @@ models keep an improved ASCII-only view.
    them.
 3. [x] `run_agent_stream` decodes `reference_b64` → PIL once, passes
    `reference_img` to `make_tools` and to the hook.
-4. [x] Image-as-message via a `create_react_agent` **`pre_model_hook`**
-   (`agent._make_preview_hook`) — after a `view_canvas` `ToolMessage`, append a
-   `HumanMessage` carrying the triptych image (R1 fallback path, works for
-   Gemini/OpenAI/Ollama alike since it is a human turn, not a tool-role image).
+4. [x] Image delivery: `view_canvas` **returns the triptych image directly in
+   its tool result** (`[{"type":"text"...}, {"type":"image_url"...}]`).
+   Gemini/Vertex/local vision models accept image content in a tool message
+   (verified). `agent._supports_tool_images()` returns False for OpenAI
+   (function role is text-only) → those get the text-only preview.
+
+   *(First attempt used a `pre_model_hook` that injected the image as a
+   `HumanMessage` after each `view_canvas`; Gemini read that fresh human turn as
+   a prompt to look again → infinite view loop, 56 tool calls / 0 draws.
+   Direct tool-result return: one turn, no loop.)*
 5. [x] ASCII grid only for `canvas.size <= PREVIEW_ASCII_MAX` (32); larger
    canvases get "read the attached preview image" + axis restatement.
 6. [x] Edit tint: `preview._edits(canvas)` diffs `canvas.pixels` vs
@@ -112,18 +118,27 @@ models keep an improved ASCII-only view.
 
 ### Token guardrail
 
-The hook `RemoveMessage`s the previous preview `HumanMessage` when injecting a
-new one, so **at most one triptych image** sits in context at a time. (Spec
-0004 generalises this to the reference + a small ring of recent previews.)
+Each `view_canvas` result carries one triptych PNG. Old previews accumulate in
+history like any tool result — **spec 0004 owns pruning** (keep the reference +
+a small ring of recent images). The old base64-in-text blob and the large ASCII
+grid (now trimmed > 32px) are gone, so per-call token cost is roughly
+net-neutral with far better signal.
 
 ## 6. Verification
 
-- Unit: preview image has 3 panels with a reference, 2 without; panel px size
-  matches the clamp formula for sizes 8/16/32/64/128.
-- Manual: run a refine job with logging of the exact messages sent to the LLM;
-  confirm a real image part reaches the model each `view_canvas`.
-- Quality: on 10 fixed refine tasks, count of "agent corrected a real defect it
-  could see" goes up vs 0002 baseline.
+- **Unit (`tests/test_preview.py`, 8 tests; 54 total green):** triptych is wider
+  with a reference than without; `_scale_for` clamp holds for 8/16/32/64/128;
+  ASCII grid present ≤ 32px and absent above; locked note surfaces; `view_canvas`
+  returns `[text, image_url]` for a Gemini-class model, plain `str` when
+  `tool_images` is off or the model is non-vision; `_supports_tool_images`
+  True for `gemini-*`, False for `gpt-*`.
+- **Live (`run_agent_stream`, real Gemini):** 16px mushroom, `mode: agent` —
+  agent calls `view_canvas` (gets the image), draws a dome with `fill_row`s +
+  `draw_pixels`, views once more, finishes. 16 tool calls, **no view loop**,
+  136 px filled. (The pre-fix hook version: 56 calls, 10 views, timed out.)
+- Quality bar (10 fixed refine tasks vs 0002): to be run once 0004/0005 land —
+  the preview only pays off with the reference kept in context (0004) and the
+  phased workflow (0005).
 
 ## 7. Risks
 
