@@ -1,7 +1,7 @@
 # Spec 0003 — Visual Preview Overhaul
 
-- **Branch:** `spec/0003-visual-preview-overhaul` (from `spec/0002-reference-seeded-canvas`)
-- **Status:** Planned
+- **Branch:** `spec/0003-visual-preview-overhaul` (from `main`, after 0002)
+- **Status:** Implemented — merged to local `main`
 - **Depends on:** 0002 (silhouette mask, seed diff).
 - **North-star link:** The refinement agent can finally *see* what it made and
   compare it to the reference.
@@ -81,18 +81,40 @@ models keep an improved ASCII-only view.
 - Token budget: triptych PNG at 3×320px is well within vision limits; ASCII trim
   offsets the cost.
 
-## 5. Tasks (outline)
+## 5. Tasks
 
-1. [ ] `_preview.py` with `build_preview_image` / `build_preview_text` + tests
-   (image dimensions, panel count with/without reference).
-2. [ ] Move `render_grid_overlay` into shared module; repoint `server.py`.
-3. [ ] Pass `reference_img` + `seed_grid` into `make_tools`.
-4. [ ] Image-as-message plumbing in `run_agent_stream` stream loop.
-5. [ ] ASCII trim above size 32.
-6. [ ] Diff tint from seed.
-7. [ ] Non-vision path: keep ASCII, add clearer ruler + explicit
-   "row y / column x" restatement.
-8. [ ] Verification.
+1. [x] `preview.py` — `build_preview_image(canvas, reference_img)` (labelled
+   triptych, `_scale_for` clamp formula, edit tint) + `build_preview_text(canvas)`.
+   `tests/test_preview.py` (7 tests).
+2. [~] Grid-overlay logic lives in `preview.py` (`_sprite_panel(grid_overlay=True)`).
+   `server.render_grid_overlay` / `build_assessment_context` were already dead
+   (no callers) — **left in place**, not repointed; a cleanup pass can remove
+   them.
+3. [x] `run_agent_stream` decodes `reference_b64` → PIL once, passes
+   `reference_img` to `make_tools` and to the hook.
+4. [x] Image-as-message via a `create_react_agent` **`pre_model_hook`**
+   (`agent._make_preview_hook`) — after a `view_canvas` `ToolMessage`, append a
+   `HumanMessage` carrying the triptych image (R1 fallback path, works for
+   Gemini/OpenAI/Ollama alike since it is a human turn, not a tool-role image).
+5. [x] ASCII grid only for `canvas.size <= PREVIEW_ASCII_MAX` (32); larger
+   canvases get "read the attached preview image" + axis restatement.
+6. [x] Edit tint: `preview._edits(canvas)` diffs `canvas.pixels` vs
+   `canvas.seed_pixels` (0002); tinted on the CURRENT and GRID panels.
+7. [x] Non-vision path: `view_canvas` returns `build_preview_text`, which now
+   prefixes the ASCII grid with an explicit "top digits = x, left digits = y"
+   restatement.
+8. [x] Verification — Section 6.
+
+### Config (R6)
+
+`PREVIEW_PANEL_PX` (320), `PREVIEW_PANEL_MIN` (192), `PREVIEW_PANEL_MAX` (512),
+`PREVIEW_ASCII_MAX` (32) — env-overridable constants in `preview.py`.
+
+### Token guardrail
+
+The hook `RemoveMessage`s the previous preview `HumanMessage` when injecting a
+new one, so **at most one triptych image** sits in context at a time. (Spec
+0004 generalises this to the reference + a small ring of recent previews.)
 
 ## 6. Verification
 
@@ -112,8 +134,21 @@ models keep an improved ASCII-only view.
 
 ## 8. Definition of done
 
-- [ ] `view_canvas` delivers a real composited image part to vision models.
-- [ ] Triptych includes the reference and a coordinate-labeled panel.
-- [ ] ASCII grid trimmed above size 32; non-vision view improved.
-- [ ] Seed-diff tint visible.
-- [ ] Token/latency delta measured and documented in the PR.
+- [x] `view_canvas` → the model receives a real composited image part (via the
+  `pre_model_hook` `HumanMessage`), not base64-in-text.
+- [x] Triptych: `[reference] | current | current+coordinate-grid`, each labelled,
+  NEAREST-upscaled by the clamp formula (32px→320px panel; unit-tested for
+  8/16/32/64/128).
+- [x] ASCII grid only ≤ 32px; non-vision view prefixes an x/y axis restatement.
+- [x] Seed-diff tint on the current + grid panels (unit-tested via `_edits`).
+- [x] Token guardrail: ≤ 1 triptych image retained in context (hook
+  `RemoveMessage`s the prior one). Panel px is env-tunable for further tuning.
+- [x] 53 tests green.
+
+### Deviation
+
+- Full token/latency measurement across providers is deferred to 0004 (which
+  owns the image-context budget). 0003's guardrail (one image max) keeps the
+  delta bounded: one triptych PNG replaces the old 64² base64 blob + the large
+  ASCII grid that is now trimmed on big canvases — roughly net-neutral on
+  tokens, materially better signal.

@@ -6,8 +6,6 @@ import os
 import sys
 
 from PIL import Image
-from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import agent  # noqa: E402
@@ -50,35 +48,31 @@ def test_preview_text_notes_locked():
     assert "LOCKED" in preview.build_preview_text(c)
 
 
-# ── pre_model_hook ──
+# ── view_canvas tool return ──
 
-def test_hook_passthrough_when_last_not_view_canvas():
-    hook = agent._make_preview_hook(_canvas(16), None)
-    state = {"messages": [HumanMessage(content="hi"), AIMessage(content="ok")]}
-    out = hook(state)
-    assert "llm_input_messages" in out and "messages" not in out
-
-
-def test_hook_injects_image_after_view_canvas():
-    hook = agent._make_preview_hook(_canvas(16), None)
-    tm = ToolMessage(content="legend...", name="view_canvas", tool_call_id="c1")
-    out = hook({"messages": [HumanMessage(content="draw"), tm]})
-    assert "messages" in out
-    injected = out["messages"][-1]
-    assert isinstance(injected, HumanMessage)
-    kinds = [p.get("type") for p in injected.content]
-    assert "image_url" in kinds
-    assert injected.content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+def test_view_canvas_returns_multimodal_for_vision():
+    c = _canvas(16)
+    tools = {t.name: t for t in agent.make_tools(c, vision=True, tool_images=True)}
+    out = tools["view_canvas"].invoke({})
+    assert isinstance(out, list)
+    assert out[0]["type"] == "text"
+    assert out[1]["type"] == "image_url"
+    assert out[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
 
-def test_hook_removes_previous_preview():
-    hook = agent._make_preview_hook(_canvas(16), None)
-    old = HumanMessage(
-        id="old-preview",
-        content=[{"type": "text", "text": agent._PREVIEW_MARKER + " old"},
-                 {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}}],
-    )
-    tm = ToolMessage(content="legend", name="view_canvas", tool_call_id="c2")
-    out = hook({"messages": [old, AIMessage(content=""), tm]})
-    assert any(isinstance(m, RemoveMessage) and m.id == "old-preview" for m in out["messages"])
-    assert any(isinstance(m, HumanMessage) for m in out["messages"])
+def test_view_canvas_text_only_when_tool_images_off():
+    c = _canvas(16)
+    tools = {t.name: t for t in agent.make_tools(c, vision=True, tool_images=False)}
+    out = tools["view_canvas"].invoke({})
+    assert isinstance(out, str) and "LEGEND" in out
+
+
+def test_view_canvas_text_only_for_nonvision():
+    c = _canvas(16)
+    tools = {t.name: t for t in agent.make_tools(c, vision=False)}
+    assert isinstance(tools["view_canvas"].invoke({}), str)
+
+
+def test_supports_tool_images_by_provider():
+    assert agent._supports_tool_images("gemini-3-flash-preview") is True
+    assert agent._supports_tool_images("gpt-5.4-mini") is False

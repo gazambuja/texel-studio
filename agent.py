@@ -399,54 +399,30 @@ def _is_vision_model(model_name: str) -> bool:
     return True
 
 
-_PREVIEW_MARKER = "​canvas-preview"  # zero-width sentinel to find our own injected messages
+def _supports_tool_images(model_name: str) -> bool:
+    """True if the provider accepts image content inside a tool result message.
+
+    Gemini (direct + Vertex) and most local vision models do; OpenAI's function
+    role is text-only, so those fall back to the text-only preview.
+    """
+    return not model_name.startswith(OPENAI_MODEL_PREFIXES) and model_name not in OPENAI_MODELS_ENV
 
 
-def _make_preview_hook(canvas, reference_img):
-    """create_react_agent pre_model_hook: after a view_canvas tool result, inject
-    the triptych preview as a real image HumanMessage and drop the previous one
-    (so at most one preview image sits in context — token guardrail)."""
+def _preview_image_block(canvas, reference_img) -> dict | None:
     import base64 as _b64
     import io as _io
-
-    from langchain_core.messages import HumanMessage, RemoveMessage, ToolMessage
-
-    def hook(state):
-        messages = state["messages"]
-        last = messages[-1] if messages else None
-        is_view = isinstance(last, ToolMessage) and getattr(last, "name", "") == "view_canvas"
-        if not is_view:
-            return {"llm_input_messages": messages}
-
-        try:
-            from preview import build_preview_image
-            img = build_preview_image(canvas, reference_img)
-            buf = _io.BytesIO()
-            img.save(buf, format="PNG")
-            data_url = "data:image/png;base64," + _b64.b64encode(buf.getvalue()).decode()
-        except Exception:
-            return {"llm_input_messages": messages}
-
-        updates: list = []
-        for m in messages:
-            if getattr(m, "id", None) and isinstance(getattr(m, "content", None), list):
-                if any(isinstance(p, dict) and p.get("text", "").startswith(_PREVIEW_MARKER)
-                       for p in m.content):
-                    updates.append(RemoveMessage(id=m.id))
-        updates.append(HumanMessage(content=[
-            {"type": "text", "text": _PREVIEW_MARKER + "\nCanvas preview — left to right: "
-             + ("reference, " if reference_img is not None else "")
-             + "current sprite, current sprite with a coordinate grid (x increases →, y increases ↓). "
-             "Blue-tinted cells are pixels you have changed from the starting underlay."},
-            {"type": "image_url", "image_url": {"url": data_url}},
-        ]))
-        return {"messages": updates}
-
-    return hook
+    try:
+        from preview import build_preview_image
+        buf = _io.BytesIO()
+        build_preview_image(canvas, reference_img).save(buf, format="PNG")
+        url = "data:image/png;base64," + _b64.b64encode(buf.getvalue()).decode()
+        return {"type": "image_url", "image_url": {"url": url}}
+    except Exception:
+        return None
 
 
 def make_tools(canvas: Canvas, vision: bool = True, full_toolset: bool = True,
-               reference_img=None):
+               reference_img=None, tool_images: bool = True):
     """Create agent tools.
 
     vision=False -> ASCII-only view_canvas.
@@ -508,12 +484,18 @@ def make_tools(canvas: Canvas, vision: bool = True, full_toolset: bool = True,
         return f"Drew {'filled' if fill else 'outline'} circle at ({cx},{cy}) r={radius}, {count}px"
 
     @tool
-    def view_canvas() -> str:
+    def view_canvas():
         """View the current canvas: color legend, fill counts and a spatial layout
         summary (plus an ASCII grid for small canvases). Vision models also get an
-        upscaled, coordinate-labelled preview image. Call this often to check your work."""
+        upscaled, coordinate-labelled preview image (reference | current | current
+        with a coordinate grid; blue tint = pixels you changed). Call this often."""
         from preview import build_preview_text
-        return build_preview_text(canvas)
+        text = build_preview_text(canvas)
+        if vision and tool_images:
+            block = _preview_image_block(canvas, reference_img)
+            if block is not None:
+                return [{"type": "text", "text": text}, block]
+        return text
 
     @tool
     def get_pixel(x: int, y: int) -> str:
@@ -824,15 +806,16 @@ def run_agent_stream(
         except Exception:
             reference_img = None
 
-    tools = make_tools(canvas, vision=vision, full_toolset=full_toolset, reference_img=reference_img)
+    # spec 0003 — view_canvas returns an upscaled, coordinate-labelled triptych
+    # image directly in its tool result (Gemini / Vertex / local vision models
+    # accept image content in tool messages). OpenAI's function role is text-only,
+    # so those get the improved text summary.
+    tool_images = vision and _supports_tool_images(model_name)
+    tools = make_tools(canvas, vision=vision, full_toolset=full_toolset,
+                       reference_img=reference_img, tool_images=tool_images)
     llm = _get_llm(model_name)
     checkpointer = get_checkpointer()
-
-    # spec 0003 — after every view_canvas tool result, hand the model a real
-    # upscaled, coordinate-labelled preview image (works across providers because
-    # it goes in as a HumanMessage, not a tool-role image).
-    pre_hook = _make_preview_hook(canvas, reference_img) if vision else None
-    agent = create_react_agent(llm, tools, checkpointer=checkpointer, pre_model_hook=pre_hook)
+    agent = create_react_agent(llm, tools, checkpointer=checkpointer)
 
     # A fresh thread that was handed a pre-filled canvas (e.g. the image-first
     # pipeline's refine pass) is editing, not creating from scratch.
