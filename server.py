@@ -660,6 +660,83 @@ def _run_agent_sse(generation_id: int, message: str, is_continuation: bool = Fal
 
     db.close()
 
+
+def _run_render_sse(generation_id: int, data: "GenerateRequest"):
+    """SSE generator for the image-first pipeline (spec 0001), self-hosted path.
+
+    Runs the `sprite.render` job handler inline and translates its Events into
+    the SSE shape the standalone UI already understands (log / pixels / complete).
+    """
+    from jobs import JobContext
+    from jobs.sprite_render import SpriteRenderHandler, SpriteRenderParams
+
+    db = get_db()
+    yield sse_event("log", {"step": "start", "message": f"Image-first render {data.size}x{data.size}..."})
+
+    params = SpriteRenderParams(
+        reference_id=data.reference_id,
+        prompt=data.prompt,
+        colors=data.colors,
+        size=data.size,
+        sprite_type=data.sprite_type,
+        model=data.model,
+        auto_reference=data.auto_reference,
+        refine=data.refine,
+        refine_model=data.model if (data.model in ALL_MODELS) else None,
+        system_prompt=data.system_prompt,
+    )
+    ctx = JobContext(job_id=str(generation_id), external_id=str(generation_id))
+
+    final: dict | None = None
+    try:
+        for ev in SpriteRenderHandler().run(params, ctx):
+            if ev.name == "log":
+                yield sse_event("log", {"step": ev.data.get("step", "log"), "message": ev.data.get("message", "")})
+                if ev.data.get("reference_id"):
+                    db.execute("UPDATE generations SET reference_id = ? WHERE id = ?",
+                               (ev.data["reference_id"], generation_id))
+                    db.commit()
+            elif ev.name == "progress":
+                yield sse_event("pixels", {
+                    "pixel_data": ev.data.get("pixel_data"),
+                    "iteration": ev.data.get("iteration", 0),
+                    "notes": ev.data.get("notes", ""),
+                    "gen_id": generation_id,
+                })
+            elif ev.name == "result":
+                final = ev.data
+            elif ev.name == "error":
+                db.execute("UPDATE generations SET status = 'error' WHERE id = ?", (generation_id,))
+                db.commit()
+                yield sse_event("error", {"message": ev.data.get("message", "render failed")})
+                db.close()
+                return
+    except Exception as e:
+        db.execute("UPDATE generations SET status = 'error' WHERE id = ?", (generation_id,))
+        db.commit()
+        yield sse_event("error", {"message": str(e)})
+        db.close()
+        return
+
+    if not final:
+        yield sse_event("error", {"message": "Render produced no result"})
+        db.close()
+        return
+
+    colors = final.get("colors") or data.colors
+    db.execute(
+        "UPDATE generations SET pixel_data = ?, colors = ?, iterations = ?, status = 'complete', image_path = ? WHERE id = ?",
+        (json.dumps(final["pixel_data"]), json.dumps(colors), final.get("iterations", 1),
+         final["image_path"], generation_id),
+    )
+    db.commit()
+    db.close()
+    yield sse_event("pixels", {
+        "pixel_data": final["pixel_data"], "iteration": final.get("iterations", 1),
+        "notes": "Render finished", "gen_id": generation_id,
+    })
+    yield sse_event("complete", {"id": generation_id, "image_path": final["image_path"], "colors": colors})
+
 # ── FastAPI ──
 
 app = FastAPI(title="Texel Studio")
@@ -722,6 +799,19 @@ class GenerateRequest(BaseModel):
     reference_id: Optional[str] = None
     sprite_type: str = "block"
     external_id: Optional[str] = None  # Optional tracking ID (forwarded to worker webhook)
+    # spec 0001 — image-first pipeline
+    mode: str = "auto"            # "auto" | "image-first" | "agent"
+    refine: bool = False          # run a short LLM cleanup pass after image-first
+    auto_reference: bool = True   # generate a concept image when none was supplied
+
+
+def _use_image_first(data: "GenerateRequest") -> bool:
+    """image-first when explicitly asked, or on 'auto' with a reference present."""
+    if data.mode == "agent":
+        return False
+    if data.mode == "image-first":
+        return True
+    return data.mode == "auto" and bool(data.reference_id)
 
 class ManualPixelUpdate(BaseModel):
     generation_id: int
@@ -897,29 +987,14 @@ def serve_reference(ref_id: str):
 @app.get("/api/reference/{ref_id}/palette")
 def extract_reference_palette(ref_id: str, max_colors: int = 16):
     """Extract dominant palette colors from a reference image."""
-    from collections import Counter
     import storage
+    from jobs._render_core import derive_palette
     data = storage.read_file(f"references/{ref_id}")
     if not data:
         raise HTTPException(404, "Reference not found")
 
     img = Image.open(io.BytesIO(data)).convert("RGBA")
-    opaque = [p[:3] for p in img.getdata() if p[3] >= 128]
-    if not opaque:
-        return {"colors": ["#000000"]}
-
-    counts = Counter(opaque)
-    if len(counts) <= max_colors:
-        raw_colors = [c for c, _ in counts.most_common(max_colors)]
-    else:
-        flat = Image.new("RGB", (len(opaque), 1))
-        flat.putdata(opaque)
-        q = flat.quantize(colors=max_colors, method=Image.Quantize.MEDIANCUT)
-        pal = q.getpalette()[:max_colors * 3]
-        raw_colors = [(pal[i], pal[i+1], pal[i+2]) for i in range(0, len(pal), 3)]
-
-    raw_colors.sort(key=lambda c: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2])
-    return {"colors": [f"#{r:02x}{g:02x}{b:02x}" for r, g, b in raw_colors]}
+    return {"colors": derive_palette(img, max_colors)}
 
 # ── Generation endpoints ──
 
@@ -983,26 +1058,48 @@ async def start_generation(data: GenerateRequest):
     db.commit()
     db.close()
 
+    image_first = _use_image_first(data)
+
     rd = get_redis()
     if rd:
         import uuid as _uuid
         job_id = str(_uuid.uuid4())
         # Subscribe BEFORE pushing job to avoid race condition
         sub = _subscribe_redis(job_id)
-        rd.lpush("texel:jobs", json.dumps({
-            "type": "generate",
-            "job_id": job_id,
-            "gen_id": gen_id,
-            "message": data.prompt,
-            "colors": data.colors,
-            "size": data.size,
-            "model": model,
-            "sprite_type": data.sprite_type,
-            "system_prompt": data.system_prompt,
-            "reference_id": data.reference_id,
-            "external_id": data.external_id,
-            "is_continuation": False,
-        }))
+        if image_first:
+            rd.lpush("texel:jobs", json.dumps({
+                "type": "job",
+                "kind": "sprite.render",
+                "job_id": job_id,
+                "external_id": str(gen_id),
+                "params": {
+                    "reference_id": data.reference_id,
+                    "prompt": data.prompt,
+                    "colors": data.colors,
+                    "size": data.size,
+                    "sprite_type": data.sprite_type,
+                    "model": model,
+                    "auto_reference": data.auto_reference,
+                    "refine": data.refine,
+                    "refine_model": model,
+                    "system_prompt": data.system_prompt,
+                },
+            }))
+        else:
+            rd.lpush("texel:jobs", json.dumps({
+                "type": "generate",
+                "job_id": job_id,
+                "gen_id": gen_id,
+                "message": data.prompt,
+                "colors": data.colors,
+                "size": data.size,
+                "model": model,
+                "sprite_type": data.sprite_type,
+                "system_prompt": data.system_prompt,
+                "reference_id": data.reference_id,
+                "external_id": data.external_id,
+                "is_continuation": False,
+            }))
         return StreamingResponse(
             _sse_from_pubsub(sub),
             media_type="text/event-stream",
@@ -1010,8 +1107,9 @@ async def start_generation(data: GenerateRequest):
         )
 
     # Fallback: in-memory (no Redis, self-hosted)
+    generator = _run_render_sse(gen_id, data) if image_first else _run_agent_sse(gen_id, data.prompt, colors=data.colors)
     return StreamingResponse(
-        _run_agent_sse(gen_id, data.prompt, colors=data.colors),
+        generator,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
