@@ -51,7 +51,7 @@ Execution order: **0001 → 0007 → 0002 → 0003 → 0004 → 0005 → 0006.**
 | Spec | Branch | Cut from | Theme |
 |------|--------|----------|-------|
 | 0001 | `spec/0001-image-first-pipeline` | `main` | Image model + quantize is the primary path — **done** |
-| 0007 | `spec/0007-completion-score-gate` | `main` (after 0001) | LLM scores the finished sprite vs the goal; low score → offer "+N steps" |
+| 0007 | `spec/0007-completion-score-gate` | `main` (after 0001) | LLM scores the finished sprite vs the goal; low score → offer "+N steps" — **done** |
 | 0002 | `spec/0002-reference-seeded-canvas` | `main` (after 0007) | Agent starts from the quantized reference, not blank |
 | 0003 | `spec/0003-visual-preview-overhaul` | `main` (after 0002) | Give the agent a preview it can actually read |
 | 0004 | `spec/0004-persistent-reference-context` | `main` (after 0003) | Keep the reference in front of the agent |
