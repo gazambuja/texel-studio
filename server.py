@@ -187,6 +187,12 @@ def init_db():
         conn.execute("ALTER TABLE generations ADD COLUMN sprite_type TEXT DEFAULT 'block'")
     if not _has_column(conn, "generations", "reference_id"):
         conn.execute("ALTER TABLE generations ADD COLUMN reference_id TEXT")
+    if not _has_column(conn, "generations", "score"):
+        conn.execute("ALTER TABLE generations ADD COLUMN score INTEGER")
+    if not _has_column(conn, "generations", "score_reason"):
+        conn.execute("ALTER TABLE generations ADD COLUMN score_reason TEXT")
+    if not _has_column(conn, "generations", "score_rounds"):
+        conn.execute("ALTER TABLE generations ADD COLUMN score_rounds INTEGER DEFAULT 0")
 
     # Insert default palette if none exist
     if conn.execute("SELECT COUNT(*) FROM palettes").fetchone()[0] == 0:
