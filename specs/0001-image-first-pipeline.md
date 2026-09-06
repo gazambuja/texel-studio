@@ -129,11 +129,23 @@ those, starting from the good quantized image — not from blank.
 
 - WHEN the request sets `refine: true`, THE SYSTEM SHALL, after the deterministic
   pipeline, invoke the agent seeded with the quantized `pixel_data` as the
-  starting canvas (via `existing_pixels`) and a short instruction to *correct
-  defects only*, capped at a low `max_steps` (default 20).
+  starting canvas (via `existing_pixels`) **and the reference image**, using the
+  dedicated `build_refine_prompt` (a refine-focused system prompt — "improve
+  what's already drawn, do NOT redraw / clear / restyle"), NOT the from-scratch
+  `build_system_prompt`.
+- The pass is capped at `refine_steps` (**default 80** — a hard cap, not a
+  target; the agent stops early via `finish()` when the sprite looks right).
 - WHEN `refine` is false or unset, THE SYSTEM SHALL NOT call any LLM in this job.
-- The refine pass SHALL reuse `run_agent_stream` unchanged (it already accepts
-  `existing_pixels`); only the calling job assembles the seed + prompt.
+- `run_agent_stream` selects `build_refine_prompt` automatically whenever a fresh
+  thread is handed a non-blank `existing_pixels` (`seeded` branch) — shared with
+  the spec 0002 seed path.
+
+> **Post-merge fix (user feedback):** the original refine used a *short* pass
+> (cap 20) and appended a "refine it" note to the full from-scratch prompt — the
+> model read the "Plan what to draw / fill large areas first" workflow and
+> started a new sprite. Replaced with `build_refine_prompt` + the reference +
+> cap 80. Verified live: quantized grid (77 px) → refined (88 px), never dropped
+> below 68, produced a clean cap+spots+stem.
 
 > Note: full "start the agent from the reference" ergonomics are Spec 0002.
 > Here we only need the minimal hook.
