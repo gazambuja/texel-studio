@@ -287,25 +287,83 @@ export function ControlPanel({ studio }: { studio: any }) {
       {/* ── Bottom: Generate Button ── */}
       <div className="p-3" style={{ borderTop: "1px solid var(--border)" }}>
         <div className="flex gap-1 items-center mb-1.5" style={{ fontSize: "10px" }}>
-          <select ref={modeRef} defaultValue="auto" className="flex-1" title="auto = image-first when a reference is set, agent otherwise">
+          <select ref={modeRef} defaultValue="auto" className="flex-1" title="Cómo se genera: auto elige image-first si hay referencia, agent si no">
             <option value="auto">mode: auto</option>
             <option value="image-first">image-first</option>
             <option value="agent">agent</option>
           </select>
-          <label className="flex items-center gap-1 select-none" style={{ color: "var(--text-dim)" }} title="Run a short LLM cleanup pass after the image-first render">
+          <label className="flex items-center gap-1 select-none" style={{ color: "var(--text-dim)" }} title="Solo image-first: pasada corta del LLM que arregla defectos sin redibujar">
             <input type="checkbox" ref={refineRef} /> refine
           </label>
-          <select ref={seedModeRef} defaultValue="soft" className="flex-1" title="Agent mode: how strictly the reference underlay is kept">
+          <select ref={seedModeRef} defaultValue="soft" className="flex-1" title="Solo agent: de dónde parte el agente y si la silueta de la referencia queda congelada">
             <option value="soft">seed: soft</option>
             <option value="locked">seed: locked</option>
             <option value="off">seed: off</option>
           </select>
-          <select ref={workflowRef} defaultValue="" className="flex-1" title="Agent mode: phased runs silhouette→colors→shading→detail→cleanup with a silhouette gate">
+          <select ref={workflowRef} defaultValue="" className="flex-1" title="Solo agent: phased trabaja en fases con control de calidad; freeform dibuja libre en un pase">
             <option value="">workflow: auto</option>
             <option value="phased">phased</option>
             <option value="freeform">freeform</option>
           </select>
         </div>
+
+        {/* Ayuda de opciones */}
+        <details className="mb-1.5" style={{ color: "var(--text-dim)", fontSize: "10px" }}>
+          <summary className="cursor-pointer select-none">¿qué hace cada opción?</summary>
+          <div style={{ marginTop: 6, lineHeight: 1.5 }}>
+            <p style={{ marginBottom: 6, color: "var(--text-faint)" }}>
+              Regla rápida: <b>foto/imagen de referencia → deja todo en auto</b>. Prompt de
+              texto sin referencia y quieres control de estilo → <b>mode: agent</b>.
+            </p>
+
+            <p><b>mode</b> — cómo se construye el sprite</p>
+            <ul style={{ paddingLeft: 14, marginBottom: 6 }}>
+              <li><b>auto</b>: con referencia usa <i>image-first</i>; sin referencia usa <i>agent</i>.</li>
+              <li><b>image-first</b>: redimensiona la imagen → la cuantiza a tu paleta → limpia
+                píxeles sueltos y fondo. Rápido (~2 s), fiel y siempre igual. Sin referencia,
+                genera antes una imagen conceptual con IA.
+                <br /><i>Ej.:</i> subes una foto de una espada y quieres su versión pixel art.</li>
+              <li><b>agent</b>: un LLM dibuja con herramientas (rectángulos, líneas, píxeles…),
+                mirando su avance. Más lento, más control creativo.
+                <br /><i>Ej.:</i> «bloque de piedra musgosa estilo Terraria» sin referencia.</li>
+            </ul>
+
+            <p><b>refine</b> — solo con image-first</p>
+            <ul style={{ paddingLeft: 14, marginBottom: 6 }}>
+              <li>Tras el render, el LLM hace una pasada corta que corrige <i>solo</i> defectos
+                (píxeles sueltos, bordes rotos, algún color mal). No redibuja.
+                Cuesta una llamada extra: úsalo si el resultado se ve «con ruido», déjalo
+                apagado si ya está limpio.</li>
+            </ul>
+
+            <p><b>seed</b> — solo con mode: agent — punto de partida</p>
+            <ul style={{ paddingLeft: 14, marginBottom: 6 }}>
+              <li><b>soft</b> (por defecto): el agente arranca desde una conversión rápida de la
+                referencia y la refina; puede reformar el contorno si hace falta.</li>
+              <li><b>locked</b>: igual, pero la silueta (opaco/transparente) queda <i>congelada</i>;
+                el agente solo cambia color y detalle dentro de la forma.
+                <br /><i>Ej.:</i> el contorno de tu referencia ya es exacto y no quieres que lo toque.</li>
+              <li><b>off</b>: lienzo en blanco, el agente construye todo desde cero. Úsalo sin
+                referencia.</li>
+            </ul>
+
+            <p><b>workflow</b> — solo con mode: agent — cómo trabaja</p>
+            <ul style={{ paddingLeft: 14, marginBottom: 6 }}>
+              <li><b>auto</b>: <i>phased</i> si hay referencia, <i>freeform</i> si no.</li>
+              <li><b>phased</b>: 5 fases con control de calidad — silueta → colores base →
+                sombreado → detalle → limpieza. Tras la silueta la compara con la referencia y
+                reintenta si no encaja. Resultados más legibles; más lento.</li>
+              <li><b>freeform</b>: dibuja libre en un solo pase. Más rápido, menos predecible.</li>
+            </ul>
+
+            <p style={{ color: "var(--text-faint)" }}>
+              Cada generación termina con una <b>nota de parecido 0–100</b> (IA que compara el
+              sprite con tu petición). Si es baja te ofrece «seguir dibujando N pasos más».
+              Las generaciones son deterministas por defecto (temperatura baja + semilla fija):
+              repetir la misma petición da el mismo resultado.
+            </p>
+          </div>
+        </details>
 
         {/* Phase tracker (spec 0005) */}
         {studio.currentPhase && (
