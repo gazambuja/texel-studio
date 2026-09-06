@@ -8,8 +8,9 @@ canvas primitive by primitive, we:
        auto-generated concept image),
     2. run the deterministic `_render_core` pipeline
        (resize → quantize → background removal → despeckle),
-    3. optionally run a short LLM "refine" pass seeded from that grid to fix
-       localized defects only.
+    3. optionally run an LLM "refine" pass that EDITS that grid (seeded via
+       `existing_pixels`, using build_refine_prompt) — fix edges, colours and
+       add detail without redrawing. Runs up to `refine_steps`, stops early.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ class SpriteRenderParams(BaseModel):
     auto_reference: bool = True
     refine: bool = False
     refine_model: Optional[str] = None
-    refine_steps: int = 20
+    refine_steps: int = 80          # hard cap; the agent stops early when it's done
     system_prompt: Optional[str] = None
 
 
@@ -148,9 +149,9 @@ def _explicit_palette(colors: list[str]) -> Optional[list[str]]:
 
 def _refine(params, external_id, grid, palette, bridge: EventBridge, ctx):
     from agent import run_agent_stream
-    from server import DEFAULT_MODEL
+    from server import DEFAULT_MODEL, load_reference_b64
 
-    bridge.emit(log("Refining: fixing localized defects only...", step="refine"))
+    bridge.emit(log("Refining the generated sprite...", step="refine"))
     steps = [0]
 
     def on_step(canvas, step_type, msg):
@@ -164,19 +165,16 @@ def _refine(params, external_id, grid, palette, bridge: EventBridge, ctx):
             ))
 
     canvas = run_agent_stream(
+        # The refine agent EDITS the quantized grid — `existing_pixels` seeds the
+        # canvas and `run_agent_stream` picks the refine prompt (build_refine_prompt).
         gen_id=external_id,
-        message=(
-            (params.prompt or "")
-            + "\n\nThe canvas already contains a faithful first-pass conversion "
-            "of the reference. Fix ONLY obvious defects: stray pixels, broken "
-            "edges, a handful of wrong-colored spots. Do not redraw or restyle "
-            "anything else. Call finish when done."
-        ),
+        message=(params.prompt or params.sprite_type),
         palette=palette,
         size=params.size,
         model_name=params.refine_model or DEFAULT_MODEL,
         style_prompt=params.system_prompt or "",
         sprite_type=params.sprite_type,
+        reference_b64=load_reference_b64(params.reference_id),
         on_step=on_step,
         max_steps=params.refine_steps,
         existing_pixels=grid,

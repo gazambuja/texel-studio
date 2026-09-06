@@ -921,6 +921,58 @@ WORKFLOW:
 IMPORTANT: Call view_canvas after every few drawing steps. It shows you exactly what the canvas looks like so you can correct mistakes early."""
 
 
+def build_refine_prompt(subject: str, palette: list[str], size: int, style_prompt: str,
+                        sprite_type: str, grid_string: str, has_reference: bool,
+                        locked: bool = False) -> str:
+    """System prompt for the seeded / refine path: the canvas is ALREADY drawn and
+    the job is to improve it, not to build a new sprite (see spec 0002 / the
+    image-first refine pass)."""
+    palette_desc = "\n".join(f"  {i}: {c}" for i, c in enumerate(palette))
+    lock_rule = (
+        "- Do NOT change the silhouette at all — it is LOCKED. Only recolour and "
+        "detail inside the existing shape."
+        if locked else
+        "- Keep the overall silhouette. Only nudge the outline where it clearly "
+        "disagrees with the reference."
+    )
+    ref_line = (
+        "A reference image is attached — compare against it and call view_reference() "
+        "any time you are unsure.\n"
+        if has_reference else ""
+    )
+    return f"""{style_prompt}
+
+You are REFINING an existing {size}x{size} pixel-art sprite. It is ALREADY DRAWN
+on the canvas below — a first-pass conversion of the target. Your job is to make
+it better, NOT to draw a new one.
+
+TARGET: {subject}
+
+PALETTE (indices, -1 = transparent):
+{palette_desc}
+
+{ref_line}WHAT TO DO — targeted improvements only:
+- fix stray / isolated pixels and jagged or broken edges
+- correct wrong-coloured regions to the palette colour the target shows
+- add light shading and the small details that make it read at 1x
+{lock_rule}
+
+WHAT NOT TO DO:
+- do NOT clear the canvas, do NOT fill large areas with -1, do NOT "start over"
+- do NOT redraw the whole sprite or restyle parts that already look right
+
+COORDINATE SYSTEM: (0,0) = top-left, x → right (columns), y ↓ down (rows).
+Each grid character is a palette index; '.' is transparent.
+
+WORKFLOW: call view_canvas first to study the current state → make a few
+targeted edits → view_canvas again to check → repeat → call finish when it looks
+good. Use as many steps as it needs (there is a hard cap); stop as soon as it
+looks right.
+
+CURRENT CANVAS STATE:
+{grid_string}"""
+
+
 # ── Run agent (initial or continuation) ──
 
 def run_agent_stream(
@@ -1011,27 +1063,17 @@ def run_agent_stream(
     seeded = is_new and _has_content(existing_pixels)
 
     if is_new:
-        sys_prompt = build_system_prompt(message, palette, size, style_prompt, reference_b64 is not None, sprite_type, model_name)
         if seeded:
-            lock_note = (
-                "\nThe silhouette is LOCKED: drawing that would add or remove the "
-                "subject's outline is ignored — you can only change colors and "
-                "detail inside the existing shape."
-                if locked else
-                "\nThe underlay is a suggestion — you may reshape it where the "
-                "reference clearly disagrees."
+            sys_prompt = build_refine_prompt(
+                message, palette, size, style_prompt, sprite_type,
+                canvas.to_grid_string(), has_reference=reference_b64 is not None,
+                locked=locked,
             )
-            sys_prompt += f"""
-
-IMPORTANT — THE CANVAS IS NOT BLANK.
-It already contains a faithful first-pass conversion of the reference. Your job
-is to REFINE it, not rebuild it: fix edges, fix wrong colors, add readable
-detail, then finish. Call view_canvas first.
-Do NOT clear the canvas or fill large areas with -1 to "start over" — work from
-what is already there.{lock_note}
-
-CURRENT CANVAS STATE:
-{canvas.to_grid_string()}"""
+        else:
+            sys_prompt = build_system_prompt(
+                message, palette, size, style_prompt,
+                reference_b64 is not None, sprite_type, model_name,
+            )
         user_parts = [{"type": "text", "text": sys_prompt}]
         if reference_b64:
             user_parts.append({

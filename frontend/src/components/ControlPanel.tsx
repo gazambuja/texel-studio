@@ -292,7 +292,7 @@ export function ControlPanel({ studio }: { studio: any }) {
             <option value="image-first">image-first</option>
             <option value="agent">agent</option>
           </select>
-          <label className="flex items-center gap-1 select-none" style={{ color: "var(--text-dim)" }} title="Solo image-first: pasada corta del LLM que arregla defectos sin redibujar">
+          <label className="flex items-center gap-1 select-none" style={{ color: "var(--text-dim)" }} title="Solo image-first: el LLM edita el sprite ya generado (bordes, colores, detalle) sin redibujarlo">
             <input type="checkbox" ref={refineRef} /> refine
           </label>
           <select ref={seedModeRef} defaultValue="soft" className="flex-1" title="Solo agent: de dónde parte el agente y si la silueta de la referencia queda congelada">
@@ -330,10 +330,11 @@ export function ControlPanel({ studio }: { studio: any }) {
 
             <p><b>refine</b> — solo con image-first</p>
             <ul style={{ paddingLeft: 14, marginBottom: 6 }}>
-              <li>Tras el render, el LLM hace una pasada corta que corrige <i>solo</i> defectos
-                (píxeles sueltos, bordes rotos, algún color mal). No redibuja.
-                Cuesta una llamada extra: úsalo si el resultado se ve «con ruido», déjalo
-                apagado si ya está limpio.</li>
+              <li>Tras el render, el LLM <i>edita el sprite ya generado</i>: arregla píxeles
+                sueltos y bordes, corrige colores mal asignados y añade sombreado/detalle.
+                No lo redibuja ni parte de cero. Trabaja los pasos que necesite (hasta un
+                tope) y para cuando queda bien. Úsalo si el render se ve «crudo» o con ruido;
+                déjalo apagado si ya está limpio.</li>
             </ul>
 
             <p><b>seed</b> — solo con mode: agent — punto de partida</p>
